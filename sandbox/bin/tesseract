@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# 桩 tesseract：按输入图的文件名认出是哪一路 OCR，回该路预置好的 TSV。
+# count.png + 没有 tsv 参数 = light_count 读进度行，按 SBX_COUNT_FILE 逐行给值。
+img=${1:-}
+want_tsv=0
+for a in "$@"; do [ "$a" = tsv ] && want_tsv=1; done
+HDR="level	page_block_number	page_block_row	block_par_number	block_par_row	line_num	word_num	left	top	width	height	conf	text"
+
+if [ $want_tsv = 0 ]; then
+  case "$img" in
+    *count.png)
+      f=${SBX_COUNT_FILE:-}
+      [ -s "$f" ] || exit 0
+      idx=${SBX_COUNT_IDX_FILE:-/tmp/sbx_count_idx}
+      n=$(cat "$idx" 2>/dev/null || echo 0)
+      line=$(sed -n "$((n + 1))p" "$f")
+      printf '%s' "$((n + 1))" >"$idx"
+      [ -n "$line" ] && printf '%s\n' "$line"
+      ;;
+    *pend.png)
+      # pend_scan 的整页复读：给 SBX_PEND_TEXT（可以带换行，脚本自己按行 grep 再拼）。
+      # SBX_PEND_MISS="6 12" = 这些 --psm 档回空，用来造「现状那档读不到、换档才读到」。
+      psmv=; prev=
+      for a in "$@"; do
+        [ "$prev" = --psm ] && psmv=$a
+        prev=$a
+      done
+      case " ${SBX_PEND_MISS:-} " in *" $psmv "*) exit 0 ;; esac
+      printf '%s\n' "${SBX_PEND_TEXT:-}"
+      ;;
+    *) printf '%s\n' "${SBX_PLAIN:-}" ;;
+  esac
+  exit 0
+fi
+
+printf '%s\n' "$HDR"
+psmv=; prev=
+for a in "$@"; do
+  [ "$prev" = --psm ] && psmv=$a
+  prev=$a
+done
+v=
+case "$img" in
+  *cand.png) v=${SBX_TSV_CAND:-} ;;
+  *band.png)
+    # SBX_BAND_MISS="7 11" = 这些 --psm 档回空。10-18 真机那条横幅就是只有 psm 6 读得到，
+    # 用它钉住 band 档确实把 OCR_PSM_BAND_browse 里那几档都试了。
+    v=${SBX_TSV_BAND:-}
+    case " ${SBX_BAND_MISS:-} " in *" $psmv "*) v= ;; esac
+    ;;
+  *pill-1.png) v=${SBX_TSV_PILL1:-} ;;
+  *pill-2.png) v=${SBX_TSV_PILL2:-} ;;
+  *) v=${SBX_TSV_CAND:-} ;;
+esac
+[ -n "$v" ] && cat "$v"
+exit 0

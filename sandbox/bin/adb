@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# 桩 adb：只回话，不碰手机。行为由 SBX_* 环境变量决定。
+# 每个 input 事件都追加到 $SBX_EVENTS，用来数"到底点了几下、点了什么"。
+ev() { [ -n "${SBX_EVENTS:-}" ] && printf '%s\n' "$*" >>"$SBX_EVENTS"; return 0; }
+
+args=("$@")
+rest=()
+skip=0
+for a in "${args[@]}"; do
+  if [ $skip = 1 ]; then skip=0; continue; fi
+  if [ "$a" = "-s" ]; then skip=1; continue; fi
+  rest+=("$a")
+done
+sub="${rest[*]}"
+
+case "$sub" in
+  devices)
+    printf 'List of devices attached\n'
+    [ "${SBX_OFFLINE:-0}" = 1 ] || printf '%s\tdevice\n' "${SBX_DEV:-192.168.1.110:16132}"
+    ;;
+  start-server) : ;;
+  connect*)
+    if [ "${SBX_OFFLINE:-0}" = 1 ]; then printf 'failed to connect\n'; else printf 'connected\n'; fi
+    ;;
+  "shell input tap "*)   ev "tap ${sub#shell input tap }" ;;
+  "shell input swipe "*) ev "swipe ${sub#shell input swipe }" ;;
+  "shell input keyevent "*) ev "key ${sub#shell input keyevent }" ;;
+  "shell uiautomator dump"*) printf 'UI dump written to /sdcard/pdd_dump.xml\n' ;;
+  "exec-out screencap"*) cat "${SBX_SHOT:-/dev/null}" ;;
+  "exec-out cat "*)      cat "${SBX_XML:-/dev/null}" ;;
+  "shell dumpsys power"*) printf 'mWakefulness=%s\n' "${SBX_WAKE:-Awake}" ;;
+  "shell dumpsys window"*)
+    if [ "${SBX_LOCK:-0}" = 1 ]; then printf 'mShowingLockscreen=true\n'; fi
+    printf 'mCurrentFocus=Window{ab12cd3 u0 %s/%s}\n' \
+      "${SBX_FPKG:-com.xunmeng.pinduoduo}" "${SBX_FACT:-com.xunmeng.pinduoduo.ui.activity.HomeActivity}"
+    ;;
+  "shell wm size"*) printf 'Physical size: %s\nOverride size: %s\n' \
+      "${SBX_SIZE:-720x1280}" "${SBX_SIZE:-720x1280}" ;;
+  "shell wm dismiss-keyguard") : ;;
+  "shell am "*) ev "${sub#shell }" ;;
+  *) : ;;
+esac
+exit 0

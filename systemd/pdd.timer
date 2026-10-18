@@ -1,0 +1,16 @@
+[Unit]
+Description=每天 10:00 触发一次 pdd.service
+
+
+PartOf=home-lab.service
+
+[Timer]
+OnCalendar=*-*-* 10:00:00
+RandomizedDelaySec=180
+Persistent=true
+Unit=pdd.service
+# RandomizedDelaySec: 每次在 10:00 后再随机推 0-180 秒，别每天卡在整点
+# Persistent=true: 到点时机器关着，就开机后补跑一次
+
+[Install]
+WantedBy=timers.target

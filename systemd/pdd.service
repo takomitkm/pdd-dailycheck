@@ -1,0 +1,26 @@
+[Unit]
+Description=拼多多每日任务（无线 adb 自动化）
+Documentation=file:%h/Desktop/pdd.sh
+After=network-online.target
+# 手机是无线 adb，GUI 会话起来 10 分钟后才 adb connect；这里再兜一次底，
+# 别完全依赖 gui.service 恰好跑过。
+Wants=network-online.target
+
+
+PartOf=home-lab.service
+
+[Service]
+Type=oneshot
+# 脚本里的中文标签和 tesseract 都要 UTF-8，定时器环境默认是 C，必须显式给
+Environment=LANG=C.UTF-8 LC_ALL=C.UTF-8
+# pdd.sh 自己的 ensure_device() 会重连 4 次，但先在这里连一次：
+# 没有它，日志里第一行就会是「设备没连上」而不是真正的原因
+ExecStartPre=/bin/sh -c 'timeout 20 adb connect 192.168.1.110:16132 >/dev/null 2>&1 || true; sleep 2'
+ExecStart=%h/Desktop/pdd.sh run
+# 一次完整跑完实测约 9 分钟（bag 那一步轮播要扫 12 轮才落到 COORD 兜底），
+# 15min 余量太紧，放宽到 25min
+TimeoutStartSec=25min
+Nice=10
+
+# 故意不写 [Install]：这个服务只由 pdd.timer 触发。要是 enable 了它，
+# 每次登录会话起来就会去抢一次手机前台。

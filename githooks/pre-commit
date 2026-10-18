@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# 提交前门禁：扫暂存区里有没有凭据形态的字符串，命中就拒绝提交。
+# 这仓库是公开的，所以真凭据只有一个合法去处：主机上的 ~/Desktop/pdd-push.url（脚本运行时读它）。
+#
+# 启用（每台开发机一次）：git config core.hooksPath githooks
+# 绕过（只在你确认那条命中是文本描述、不是真值时）：git commit --no-verify
+#
+# 原则：扫不动 = 拒绝。这道闸存在的唯一理由就是不放过 token，
+# 所以任何「命令没跑成」的情况都不能当成「没扫到」——宁可挡住一次提交。
+set -uo pipefail
+
+die() { printf '%s\n' "$@" >&2; exit 1; }
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "pre-commit: 认不出 git 仓库，扫描没做成，拒绝提交。"
+
+PATTERNS='sct[0-9a-zA-Z]{20,}|SCT[0-9]{4,}[0-9a-zA-Z]{10,}|push\.ft07\.com/send/|sct\.ftqq\.com/send/|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[0-9A-Za-z]{30,}|xox[baprs]-[0-9A-Za-z-]{10,}|ASIA[0-9A-Z]{16}'
+
+# --cached 必须在 pattern 之前，否则 git grep 直接 fatal（v1 就是这么静默放行的）。
+# 不接 2>/dev/null：报错要能看见。
+hits=$(git grep -I -n -E --cached -e "$PATTERNS")
+rc=$?
+case $rc in
+  0) [ -n "$hits" ] || die "pre-commit: git grep 说命中了却给不出行，扫描状态可疑，拒绝提交。"
+     # 只隐去 25 个字符以上的连续字母数字（就是密钥本体），主机名和行号留着好定位。
+     printf '%s\n' "$hits" | sed -E 's/[A-Za-z0-9]{25,}/***（已隐去）/g' >&2
+     die '
+暂存区里有凭据形态的字符串，拒绝提交。
+拼多多推送端点请写进主机的 ~/Desktop/pdd-push.url（第一行整条 URL），脚本运行时读它，不进 git。
+确认这是误报（比如文档里在讲形态而不是给值）再 git commit --no-verify。' ;;
+  1) : ;;  # 没有命中，继续
+  *) die "pre-commit: git grep 退出码 $rc，扫描没做成，拒绝提交。" ;;
+esac
+
+# 第二道：pdd.sh 里不该再出现字面 PUSH_URL=http(s):// —— 端点只能来自文件或环境变量。
+# pdd.sh 不在索引里（首次提交前/正被删除）时跳过这一道。
+# 这里刻意不用 git show|grep -q：pipefail 下 grep 提前退出会让 git show 收到 SIGPIPE，
+# 整条管道返回 141，命中反而被判成「没命中」。here-string 走临时文件，没有这个问题。
+if git rev-parse --verify --quiet ':pdd.sh' >/dev/null; then
+  staged_pdd=$(git show :pdd.sh) || die "pre-commit: git show :pdd.sh 失败，扫描没做成，拒绝提交。"
+  if grep -qE '^PUSH_URL=https?://' <<<"$staged_pdd"; then
+    die '
+pdd.sh 里出现了字面 PUSH_URL=http(s)://…，拒绝提交。
+改成从 PUSH_URL_FILE 读：PUSH_URL=${PUSH_URL:-}，再用文件第一行填。'
+  fi
+fi
+
+exit 0

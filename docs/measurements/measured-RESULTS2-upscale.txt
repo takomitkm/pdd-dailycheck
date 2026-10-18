@@ -1,0 +1,9 @@
+th120-x1.png       290x110    psm7=[] psm6=[]
+th120-x2.png       580x220    psm7=[立即点亮] psm6=[立即点亮]
+th120-x3.png       870x330    psm7=[立即点亮] psm6=[立即点亮]
+th120-x4.png       1160x440   psm7=[立即总免] psm6=[立即总免]
+th120-x6.png       1740x660   psm7=[立即总腕] psm6=[立即总腕]
+x1+白边10        310x130    psm7=[]
+x1+白边30        350x170    psm7=[]
+ls: cannot access '/tmp/tessinput.tif': No such file or directory
+DONE

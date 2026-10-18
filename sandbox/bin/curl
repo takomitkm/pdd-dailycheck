@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# 桩 curl：不联网，把推送的标题/正文记到 $SBX_PUSH，回一个成功响应。
+t=
+d=
+for a in "$@"; do
+  case "$a" in
+    title=*) t=${a#title=} ;;
+    desp=*)  d=${a#desp=} ;;
+  esac
+done
+if [ -n "${SBX_PUSH:-}" ]; then
+  { printf 'TITLE\t%s\n' "$t"; printf 'DESPI\t%s\n' "$d"; printf '.\n'; } >>"$SBX_PUSH"
+fi
+printf '{"code":0,"message":"ok"}\n'

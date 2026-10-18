@@ -1,0 +1,22 @@
+# 沙箱产物与真机证据一律不入库
+sandbox/out/
+pdd-runs/
+__pycache__/
+*.pyc
+
+# 备份和临时件
+*.bak
+*.bak-*
+pdd.sh.bak*
+.tmp/
+tmp/
+
+# 推送端点（带 ServerChan token，等于凭据）只活在主机 ~/Desktop/pdd-push.url 里
+pdd-push.url
+*.push.url
+push.url
+
+# 标定过程中的大图矩阵（140MB 量级，用 tools/ 从证据帧现生成）
+bench*/
+frames*/
+exp/
