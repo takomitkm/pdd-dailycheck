@@ -13,7 +13,9 @@ die() { printf '%s\n' "$@" >&2; exit 1; }
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "pre-commit: 认不出 git 仓库，扫描没做成，拒绝提交。"
 
-PATTERNS='sct[0-9a-zA-Z]{20,}|SCT[0-9]{4,}[0-9a-zA-Z]{10,}|push\.ft07\.com/send/|sct\.ftqq\.com/send/|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[0-9A-Za-z]{30,}|xox[baprs]-[0-9A-Za-z-]{10,}|ASIA[0-9A-Z]{16}'
+hookdir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+[ -r "$hookdir/patterns.sh" ] || die "pre-commit: 读不到 $hookdir/patterns.sh，扫描没做成，拒绝提交。"
+. "$hookdir/patterns.sh"
 
 # --cached 必须在 pattern 之前，否则 git grep 直接 fatal（v1 就是这么静默放行的）。
 # 不接 2>/dev/null：报错要能看见。

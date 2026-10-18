@@ -11,10 +11,11 @@
 
 | 路径 | 是什么 |
 | --- | --- |
-| `pdd.sh` | 现役交付物，单文件 1840 行，直接放到跑自动化的那台 Debian 的 `~/Desktop/` |
+| `pdd.sh` | 现役交付物，单文件 1854 行，直接放到跑自动化的那台 Debian 的 `~/Desktop/` |
 | `systemd/pdd.service`、`systemd/pdd.timer` | 触发用的一次性服务和日历定时器（从主机上原样抄回） |
 | `sandbox/sbx.sh` | 桩沙箱：不碰手机，把 `pdd.sh` 的分支矩阵跑一遍，37 个用例 |
 | `sandbox/bin/{adb,tesseract,curl}` | 三个桩，只回话不执行；所有 `input` 事件记进 `$SBX_EVENTS` |
+| `githooks/pre-commit`、`githooks/pre-push`、`githooks/patterns.sh` | 凭据门禁，两道：提交前扫暂存区、推送前扫真要传上去的 blob |
 | `scripts/deploy.sh` | 备份 → `install -m 700` → 复查语法，在主机上跑 |
 | `scripts/run-sandbox.sh` | 把沙箱推到主机 `/tmp/pddsandbox/in` 并跑全矩阵 |
 | `scripts/negative-control.sh` | 负对照：故意把一条判据改成恒假，验证测试真会挂 |
@@ -27,7 +28,8 @@
 - 依赖：`adb`、`tesseract` + `chi_sim` 语言包、`python3` + Pillow、`curl`
 - 手机：ZTE A2020U Pro，无线 adb `192.168.1.110:16132`，`wm size` override 720x1280
   （override 后的点空间与截图尺寸一致，所以 OCR 读到的坐标可以直接当点击坐标用）
-- 脚本本体：`~/Desktop/pdd.sh`，权限 700（文件里带推送 token，见下面"凭据"一节）
+- 脚本本体：`~/Desktop/pdd.sh`，权限 700
+- 推送端点：`~/Desktop/pdd-push.url`，权限 600，全库唯一一处真凭据，不在仓库里（见"凭据"一节）
 - 证据目录：`~/Desktop/pdd-runs/<日期>/<时分秒>/`，保留 7 天
 
 部署（在主机上执行）：
@@ -35,6 +37,12 @@
 ```sh
 scp pdd.sh deb-h61:/tmp/pdd-deploy.sh
 ssh deb-h61 'bash -s /tmp/pdd-deploy.sh' < scripts/deploy.sh
+```
+
+第一次装（或轮换 token 之后）要把端点写进那个文件，只写第一行，脚本运行时读它：
+
+```sh
+ssh deb-h61 'umask 077; printf "%s\n" "<ServerChan 的 send 端点>" > ~/Desktop/pdd-push.url'
 ```
 
 定时器只在第一次安装时需要 enable：
@@ -68,7 +76,7 @@ pdd.sh replay <目录>   拿存下来的证据离线重跑判定，不碰手机
 
 比例给 **5 位小数**：3 位在 1440 宽的屏上有约 0.7px 的系统偏差，5 位折回像素才一个不差。
 写成越界值、写成像素、或多一段，脚本启动时直接 `exit 78` 并打印原值（校验在
-[pdd.sh:257](pdd.sh#L257)），不会默默点到 `(0,0)`。标定方法见
+[pdd.sh:266](pdd.sh#L266)），不会默默点到 `(0,0)`。标定方法见
 [docs/calibration.md](docs/calibration.md)。
 
 ## 定位顺序
@@ -92,11 +100,20 @@ app 关没关**，屏幕几何全部按 `SBX_SIZE` 折算。判据是 rc=0 且 `
 
 ## 凭据
 
-- 真实凭据只有推送地址一个，全库只出现在 **[pdd.sh:246](pdd.sh#L246)** 一处。它带 ServerChan 的
-  send token，等于凭据，所以脚本权限保持 700，仓库保持私有。要换掉或清空，改这一行即可，
-  清空后不推送但流程照跑。
-- 沙箱会先把它换成 `http://stub.push/send` 再跑，且有自检：换不成功直接 `exit 1`，
-  绝不往真实端点推（见 [docs/sandbox-testing.md](docs/sandbox-testing.md)）。
+这仓库是公开的，所以仓库里不许有任何真凭据。
+
+- 真凭据只有一个：ServerChan 的推送端点。地址本身就带 send token，等于口令，
+  所以它只写在主机的 `~/Desktop/pdd-push.url` 第一行（权限 600），脚本运行时读
+  （[pdd.sh:249](pdd.sh#L249)）。读不到 = 没配推送：一条都不推，流程照跑。
+- 轮换 token 只动那个文件，不改脚本、不进 git：
+  `ssh deb-h61 'umask 077; printf "%s\n" "<新端点>" > ~/Desktop/pdd-push.url'`
+- 环境变量 `PUSH_URL` 优先于文件，沙箱和临时覆盖走这条。
+- 两道提交门禁，启用一次 `git config core.hooksPath githooks` 就都生效：
+  `pre-commit` 扫暂存区，`pre-push` 扫这次真要传上去的每个 blob。命中凭据形态就拒绝；
+  **扫不动也拒绝**（`git grep` 用法错、`cat-file` 挂了，都当失败处理，不当"没扫到"）。
+  绕过是 `--no-verify`，只在确认那条命中是文档里的"形态描述"而不是真值时用。
+- 沙箱里还有第三道独立的：被测的 `pdd.sh` 本体里有真凭据形态就直接 `exit 1`，
+  绕过钩子也跑不起来（见 [docs/sandbox-testing.md](docs/sandbox-testing.md)）。
 - 文件里另有无线 adb 地址（内网 IP）和主机路径，不含口令。SSH 免密用的公钥不在本仓库。
 
 ## 已知残留
@@ -114,6 +131,14 @@ app 关没关**，屏幕几何全部按 `SBX_SIZE` 折算。判据是 rc=0 且 `
 
 ## 当前版本
 
-- `pdd.sh`：1840 行，md5 前缀 `69e05f4e`，2026-10-18 14:01 部署到主机 `~/Desktop/pdd.sh`
-- 沙箱：720x1280 与 1440x2560 各 37/37 绿；负对照在旧像素版上如期挂 2 条
+- `pdd.sh`：1856 行，md5 前缀 `005a47e3`，2026-10-18 16:17 部署到主机 `~/Desktop/pdd.sh`（700），
+  上一版 `69e05f4e` 存为 `pdd.sh.bak-1018-1617`；本地 / `/tmp/pdd-deploy.sh` / `~/Desktop/pdd.sh`
+  三方 md5 相等
+- 这一版唯一的改动就是把推送端点从代码里挪进 `~/Desktop/pdd-push.url`，其余 1854 行一字未动
+  （与上一版的差异只有配置区那 16 行和 `cmd_status` 里新加的那一行）
+- 沙箱：720x1280 与 1440x2560 各 37/37 绿；负对照 `browse-reenter-venue` 挂 1 条；
+  旧像素版在 1440x2560 上另挂 2 条（反向对照）
+- 端点链路实测：部署版自己的 `notify()` 推过一条，日志 `[PUSH] 已推送`（这行只在响应里
+  有 `"code":0` 时才打），值是从 `pdd-push.url` 读的；`pdd.sh status` 在 transient unit 里
+  也报 `来自 file:/home/user/Desktop/pdd-push.url`，说明 systemd 环境下 `$HOME` 解析得到
 - 本机（Windows）不是运行环境，只是开发与取证的地方；真正跑的是上面那台 Debian

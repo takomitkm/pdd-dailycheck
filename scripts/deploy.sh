@@ -26,6 +26,14 @@ else
   echo "已创建 $D/pdd-pause = 0（0 表示正常跑）"
 fi
 
+# 端点外置之后，"没配推送"是一个会静默通过的状态：当场说清楚，别等明早 10:00 才发现一条都没推。
+if [ -r "$D/pdd-push.url" ]; then
+  echo "推送端点：$D/pdd-push.url 可读，第一行长度 $(head -1 "$D/pdd-push.url" | tr -d ' \t\r\n' | wc -c)（值不打印）"
+else
+  echo "推送端点：读不到 $D/pdd-push.url —— 流程照跑，但一条都不会推。"
+  echo '  要推：主机上 umask 077 后把端点写成这个文件的第一行'
+fi
+
 systemctl --user list-timers --all 2>/dev/null | grep -E 'pdd|NEXT' | head -3
 echo "--- 本地语法复查 ---"
 bash -n "$D/pdd.sh" && echo OK

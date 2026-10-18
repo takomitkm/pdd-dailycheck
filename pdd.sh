@@ -248,8 +248,10 @@ IN_RECOVERY=                      # 1 = 正走在核实/恢复那条路上，坐
 # 换 token 只动那个文件，不用改脚本，也不会进 git。
 PUSH_URL_FILE=${PUSH_URL_FILE:-$HOME/Desktop/pdd-push.url}
 PUSH_URL=${PUSH_URL:-}
+PUSH_URL_SRC=env
 if [ -z "$PUSH_URL" ] && [ -r "$PUSH_URL_FILE" ]; then
   PUSH_URL=$(head -1 "$PUSH_URL_FILE" | tr -d ' \t\r\n')
+  [ -n "$PUSH_URL" ] && PUSH_URL_SRC="file:$PUSH_URL_FILE"
 fi
 # 完成标记：$EVIDENCE_DIR/.done-<日期>。三步点完、或屏幕上读到 ALIAS_done 都会写，
 # 当天再跑直接 exit 0，完全不碰手机。「立即兑换」只推送、不写标记，下次还会来看。
@@ -1833,9 +1835,9 @@ cmd_status() {
   )"
   printf '推送      %s\n' "$(
     if [ -z "$PUSH_URL" ]; then
-      echo "没配端点（读不到 $PUSH_URL_FILE），一条都不推，流程照跑"
+      echo "没配端点（环境变量没给，$PUSH_URL_FILE 也读不到），一条都不推，流程照跑"
     else
-      echo "端点已配置（$PUSH_URL_FILE 第一行，长度 ${#PUSH_URL}；地址本身带 token，不打印）"
+      echo "端点已配置（来自 $PUSH_URL_SRC，长度 ${#PUSH_URL}；地址本身带 token，不打印）"
     fi
   )"
   printf '证据      %s\n' "$EVIDENCE_DIR"

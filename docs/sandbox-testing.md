@@ -58,19 +58,25 @@ RSX=$(awk -v w="$SBX_W" 'BEGIN{printf "%.6f", w/720}')
 必须给出**完全相同**的判定（rc / lit / 点几下 / BACK 几下），且期望日志里的像素跟着翻。
 选 1440x2560 是因为它是整 2 倍，折算全是整数，比对没有取舍歧义。
 
-## 三条硬自检（`sbx.sh` 的 `base()`）
+## 五条硬自检（`sbx.sh` 的 `base()`）
 
-改沙箱之前先看这三条，它们全是 `exit 1` 级的：
+改沙箱之前先看这五条，它们全是 `exit 1` 级的：
 
 ```sh
 grep -q 'PUSH_URL=http://stub.push/send' "$dir/pdd.sh"   # 没换掉 → 37 例往真实 ServerChan 推 37 条
+grep -q "^PUSH_URL_FILE=$dir/push.url\$" "$dir/pdd.sh"   # 没换掉 → PUSH_URL 为空时去读桌面上那个真端点
 grep -q "^PAUSE_FILE=$dir/pause$"        "$dir/pdd.sh"   # 没换掉 → 读写真实兑换账本
 grep -q 'SWIPE_COUNT=2 '                 "$dir/pdd.sh"   # sed 没锚上 → 按真实时长跑，一遍十几分钟
+grep -qE 'sct...|push\.ft07\.com|...'    "$SRC"          # 被测脚本本体里还有真凭据形态 → 停（仓库是公开的）
 ```
 
 第一条 sed 的锚点很脆（靠 `SWIPE_DUR=300 SWIPE_COUNT=20 SWIPE_WAIT=1` 这一串字面匹配）。
 10-18 把 `SWIPE_*` 改成比例后那串一度变了，锚点差点断掉——断了的后果是 37 条真推送和
 真实账本被改。所以自检不是洁癖，是门禁。**动了配置区那一片文字，先确认锚点还在。**
+
+第五条和第二条是 10-18 转公开之后加的。端点从"写在 `pdd.sh` 里"改成"运行时读
+`$PUSH_URL_FILE` 第一行"以后，只换 `PUSH_URL=` 那一行不够：脚本会在 `PUSH_URL` 为空时
+转头去读 `$HOME/Desktop/pdd-push.url`，也就是她主机上那个真端点。所以两条都得钉住。
 
 ## 负对照
 
