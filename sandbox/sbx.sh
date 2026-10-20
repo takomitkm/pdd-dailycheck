@@ -225,10 +225,11 @@ reset_env; SBX_WAKE=Asleep; SBX_LOCK=1; run_case locked 3 - no
 reset_env; SBX_FPKG=com.miHoYo.YYS; SBX_FACT=com.miHoYo.YYS.UnityPlayerActivity
   tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_LIGHT"; run_case wrong-foreground 7 - no
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB"
-  # 10-20 起配置里压根没有 COORD_bag 了，这一例不用再 sed 掉兜底就是「认不到即收手」。
-  # 光看 rc=5 钉不住：把那颗坐标加回去它照样 rc=5（只是多盲点一下），所以这里按的是
-  # 「一次都不点坐标」—— EXPECT_NOLOG/EXPECT_TAPS 任一生效就能让那次回退变成 ✗。
-  EXPECT_TAPS=1 EXPECT_NOLOG='bag 用 coord 点' run_case bag-not-found 5 - no
+  # 认不到字就退 COORD_bag（10-20 删过又恢复，这颗现在是线上配置的一部分）。
+  # 这一例钉的是「兜底那一枪真的开了火，而且点错后被 PROVE_KEY=bag 拦下、当场报错」：
+  # 只看 rc=5 没牙——把这颗坐标删掉它照样 rc=5，只是少一枪。删掉它这条就红在
+  # 「日志里没有 bag 用 coord 点」。
+  EXPECT_TAPS=2 EXPECT_LOG="bag 用 coord 点 $(sx 100) $(sy 895)" run_case bag-not-found 5 - no
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_DONE"; countfile 4 4
   run_case already-lit 0 1 yes
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_EXC"; countfile 4 4
@@ -268,19 +269,22 @@ reset_env; SBX_COUNT_WORD='9天内点亮%s次必得'
   EXPECT_CLOSE=1 EXPECT_TAPS=3 EXPECT_PAUSE=0 EXPECT_TITLE='PDD 完成' \
   EXPECT_LOG='进度从 6 次变成 5 次' run_case count-new-wording 0 3 yes
 # 浮层盖住了进度行和胶囊：那两行字本身就是点着了的凭据。这一路「开心收下」读不到，
-# 10-11 她定的口径是读不到就不点 —— 没有量好的中心可退，所以只点了三步那三下。
+# 10-20 傍晚起退到 COORD_take 那颗量好的中心（(359,752)，10-10 那一帧量的），
+# 所以是四枪而不是三枪。日志必须写成「按量好的中心收」而不是「认到」——
+# 这一枪是盲的，出问题时得能从日志看出来。
 # 浮层是盖在**活动页**上的，所以这一组不放 T_BROWSE：放了就先被滑页那条路的 BACK 带走，
 # 测的就不再是原地那一枪（10-18 把 BACK 提到原地判定之前，这里得跟着分清）。
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_LIGHT$T_PRIZE"
-  countfile 4 4 '' '' ''; EXPECT_CLOSE=1 EXPECT_TAPS=3 EXPECT_TITLE='PDD 完成' \
-    EXPECT_LOG='浮层上读不到「开心收下」，什么都不点' \
-    run_case prize-take-unreadable 0 3 yes
+  countfile 4 4 '' '' ''; EXPECT_CLOSE=1 EXPECT_TAPS=4 EXPECT_TITLE='PDD 完成' \
+  EXPECT_LOG="按量好的中心收 $(sx 359) $(sy 752)" EXPECT_NOLOG='浮层上认到' \
+    run_case prize-take-coord 0 3 yes
 # 10-11 量过的那颗按钮：整页 psm 6/11 一个字读不到，只有裁+反色+×2+psm 7 读得清，
-# 所以「开心收下」这一路必须走胶囊档，只有认到字的那一版才多这一枪。
+# 所以「开心收下」这一路必须走胶囊档。这条和上一条都是四枪、都报 PDD 完成，光数枪分不出
+# 是哪条路 —— 所以这里按的是「日志里不许出现按中心那一枪」：胶囊档哪天坏了，它会红。
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_LIGHT$T_PRIZE"
   tsvfile "$W/pill2.tsv" "$P2_TAKE"
   countfile 4 4 '' '' ''; EXPECT_CLOSE=1 EXPECT_TAPS=4 EXPECT_TITLE='PDD 完成' \
-    EXPECT_LOG='浮层上认到「开心收下 ' EXPECT_NOLOG='什么都不点' \
+    EXPECT_LOG='浮层上认到「开心收下 ' EXPECT_NOLOG='中心收' \
     run_case prize-take-ocr 0 3 yes
 # 10-11 终态：进度行整个没了，屏幕上是「点亮任务已完成…3天后可兑换」
 # pend_scan 拿整页 OCR 抄那句原文，桩里用 SBX_PEND_TEXT 喂（必须在 reset_env 之后赋值，
@@ -325,14 +329,13 @@ reset_env; export SBX_PEND_TEXT=$'点亮任务已完成 3天后可兑换' SBX_PE
     EXPECT_LOG='天数=3（psm 11 读出的）' \
     run_case pend-days-psm-fallback 0 4 yes
 # 10-11 的翻车路线：进度行读不到 -> BACK 重试，第二枪只剩固定坐标可退，这一枪被
-# RECOVERY_NO_COORD 拦下来。10-20 起配置里已经没有 COORD_bag 了，所以这一例自己临时
-# 注回来一颗 —— 它测的是"闸门还关得住"，不是"线上有这颗坐标"。
+# RECOVERY_NO_COORD 拦下来。COORD_bag 现在是线上配置（10-20 删过又恢复），这一例不用再
+# 注——它和 bag-not-found 钉的是同一条流水的两半：那一条钉"主线开火"，这一条钉"闸门关得住"。
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_LIGHT"; countfile
   EXPECT_TAPS=2 EXPECT_CLOSE=0 \
-  EXPECT_LOG='只认出固定坐标' run_case recovery-coord-ban 5 - no \
-  's|^COORD_light=|COORD_bag=0.13889,0.69922\nCOORD_light=|'
-# 坐标兜底还剩 subsidy 和 light 两颗（bag 那颗 10-20 删了，认不到字就当场 FAIL）。
-# 这一例钉"剩下的两颗还点得成"：屏上只认得到胶囊，入口和点亮都走坐标，仍然跑成 lit=3。
+  EXPECT_LOG='只认出固定坐标' run_case recovery-coord-ban 5 - no
+# 坐标兜底一共五颗：subsidy / bag / light / take / dialog。
+# 这一例钉"入口和点亮这两颗兜底还点得成"：屏上只认得到胶囊，入口和点亮都走坐标，仍然跑成 lit=3。
 reset_env; tsvfile "$W/cand.tsv" "$T_BAG"; countfile 4 4 3
   EXPECT_LOG="light 用 coord 点 $(sx 598) $(sy 285)" run_case happy-coord 0 3 yes
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_BROWSE"
