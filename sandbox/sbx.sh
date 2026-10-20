@@ -225,7 +225,10 @@ reset_env; SBX_WAKE=Asleep; SBX_LOCK=1; run_case locked 3 - no
 reset_env; SBX_FPKG=com.miHoYo.YYS; SBX_FACT=com.miHoYo.YYS.UnityPlayerActivity
   tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_LIGHT"; run_case wrong-foreground 7 - no
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB"
-  run_case bag-not-found 5 - no 's#^COORD_bag=.*#COORD_bag=#'
+  # 10-20 起配置里压根没有 COORD_bag 了，这一例不用再 sed 掉兜底就是「认不到即收手」。
+  # 光看 rc=5 钉不住：把那颗坐标加回去它照样 rc=5（只是多盲点一下），所以这里按的是
+  # 「一次都不点坐标」—— EXPECT_NOLOG/EXPECT_TAPS 任一生效就能让那次回退变成 ✗。
+  EXPECT_TAPS=1 EXPECT_NOLOG='bag 用 coord 点' run_case bag-not-found 5 - no
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_DONE"; countfile 4 4
   run_case already-lit 0 1 yes
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_EXC"; countfile 4 4
@@ -321,18 +324,24 @@ reset_env; export SBX_PEND_TEXT=$'点亮任务已完成 3天后可兑换' SBX_PE
   EXPECT_TAPS=2 EXPECT_CLOSE=0 EXPECT_BACKS=0 EXPECT_PAUSE=3 EXPECT_TITLE='PDD 已点亮' \
     EXPECT_LOG='天数=3（psm 11 读出的）' \
     run_case pend-days-psm-fallback 0 4 yes
-# 10-11 的翻车路线：进度行读不到 -> BACK 重试，第二枪只剩固定坐标可退。
-# 现在这一枪被 RECOVERY_NO_COORD 拦下来，所以只点 2 下（入口 + 第一枪福袋）就报错收手。
+# 10-11 的翻车路线：进度行读不到 -> BACK 重试，第二枪只剩固定坐标可退，这一枪被
+# RECOVERY_NO_COORD 拦下来。10-20 起配置里已经没有 COORD_bag 了，所以这一例自己临时
+# 注回来一颗 —— 它测的是"闸门还关得住"，不是"线上有这颗坐标"。
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_LIGHT"; countfile
-  EXPECT_TAPS=2 EXPECT_CLOSE=0 run_case recovery-coord-ban 5 - no
-reset_env; countfile 4 4 3; run_case happy-coord 0 3 yes
+  EXPECT_TAPS=2 EXPECT_CLOSE=0 \
+  EXPECT_LOG='只认出固定坐标' run_case recovery-coord-ban 5 - no \
+  's|^COORD_light=|COORD_bag=0.13889,0.69922\nCOORD_light=|'
+# 坐标兜底还剩 subsidy 和 light 两颗（bag 那颗 10-20 删了，认不到字就当场 FAIL）。
+# 这一例钉"剩下的两颗还点得成"：屏上只认得到胶囊，入口和点亮都走坐标，仍然跑成 lit=3。
+reset_env; tsvfile "$W/cand.tsv" "$T_BAG"; countfile 4 4 3
+  EXPECT_LOG="light 用 coord 点 $(sx 598) $(sy 285)" run_case happy-coord 0 3 yes
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_BROWSE"
   tsvfile "$W/pill2.tsv" "$P2_LIGHT"; countfile 4 4 3; run_case happy-pill-band 0 3 yes
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_BROWSE"
   tsvfile "$W/pill1.tsv" "$P1_DONE"; countfile 4 4; run_case already-lit-pill 0 1 yes
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_LIGHT$T_BROWSE"; countfile 4 4 4
   run_case count-unchanged 6 - no
-reset_env; countfile 4 4 '' '' 5 ''; EXPECT_CLOSE=0 \
+reset_env; tsvfile "$W/cand.tsv" "$T_BAG"; countfile 4 4 '' '' 5 ''; EXPECT_CLOSE=0 \
   EXPECT_LOG="light 用 coord 点 $(sx 598) $(sy 285)" \
   run_case count-unreadable-coord 6 - no
 reset_env; tsvfile "$W/cand.tsv" "$T_SUB$T_BAG$T_LIGHT$T_POP"; countfile 4 4 '' 3

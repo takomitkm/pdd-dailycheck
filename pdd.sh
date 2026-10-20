@@ -176,12 +176,12 @@ PILL_SCALES="1 2"
 # 换分辨率（wm size 改过、或者换一台机）不用重校。括号里是在本机 720x1280 上量到的像素。
 # 比例一律给 5 位小数：3 位在 1440 宽的屏上就有 0.7px 的系统偏差，5 位折回去像素一个不差。
 COORD_subsidy=0.125,0.46875         # (90,600) ALIAS 为空时即主目标
-# 抽福袋 原来根本没有 COORD —— subsidy 和 light 都有，就它没有，于是「认不到字」
-# 就直接 FAIL。10-09 四次实测它都在 (100, 895) 附近。点歪了也不怕：do_step bag
-# 打完会跑 proof_ok，只有进度行真的出现才算进对页面。
-# 10-16/10-18 实测这颗胶囊会在两个版式之间跳：(111,894) 和 (435,524)，所以这一颗
-# 只是「老版式那个格子」的兜底，新版式那一枪全靠认字。
-COORD_bag=0.13889,0.69922           # (100,895)
+# 抽福袋这一颗**不配坐标兜底**（10-20 删掉，原来写的是 0.13889,0.69922，即老版式
+# 那一格的 (100,895)）。理由：这颗胶囊实测会在两个版式之间跳 —— (111,894) 和
+# (435,524)，固定点只盖得住一侧；10-16 那晚就是退到这一枪上，而那个位置当晚是一整张
+# 百事可乐商品卡，点错了什么也没报。现在三条认字路线（整页 OCR / band 裁片 / pill
+# 紧框）在 10-20 的真帧上都认得出它，认不到就该当场 FAIL（rc=5）让她知道，
+# 而不是拿一个分数=0 的盲点去赌。
 COORD_light=0.83056,0.22266         # (598,285)
 SCROLL_TOP=2                        # 进页面先把信息流拉回顶部，那一格的相对位置才对得上
 TOP_RETRY_KEY=subsidy               # 这一步认不到字时，滑到页面最顶端再认一轮
@@ -272,8 +272,10 @@ if [ -z "${OCR_PSM:-}" ] || [ -z "${OCR_PSM_PAGE:-}" ]; then
 fi
 # 比例一律 0..1。写成像素（比如 90,600）的话乘完飞出屏幕外，点在 (0,0) 上还不报错，
 # 所以在这里验死； REGION_/PILL_ 那两批本来就是比例，由 band_pass/pill_pass 自己处理。
-for _v in COORD_subsidy COORD_bag COORD_light COORD_dialog \
-          SWIPE_X SWIPE_Y1 SWIPE_Y2 BROWSE_X TOP_SWIPE_Y1 TOP_SWIPE_Y2; do
+# COORD_ 这一族按前缀现取，不写死名单：10-20 删掉 COORD_bag 之后写死的名单就会留下
+# 一个不存在的名字，而将来谁再挂一颗坐标兜底，也会从这道闸门底下漏出去。
+for _v in $(compgen -v COORD_) BROWSE_X SWIPE_X SWIPE_Y1 SWIPE_Y2 \
+          TOP_SWIPE_Y1 TOP_SWIPE_Y2; do
   _val=${!_v:-}
   [ -n "$_val" ] || continue
   awk -v v="$_val" 'BEGIN{
@@ -1666,27 +1668,23 @@ replay_nearest() {            # $1=key $2=线上方式（'-' 表示不限）$3=x
 }
 
 replay_frame() {              # $1=证据 stem  $2=帧里带的 key  $3=要试的 key  $4=要不要 OCR
-  local stem=$1 fkey=$2 tkey=$3 want_ocr=$4 out method xy lab sc near prev verdict
+  local stem=$1 fkey=$2 tkey=$3 want_ocr=$4 out method xy lab sc near prev verdict m
   out=$(replay_try "$tkey" "$stem" "$want_ocr")
   IFS=$'\t' read -r method xy lab sc <<<"$out"
   [ "$method" = noalias ] && method=miss
   case $method in
-    hit) if near=$(replay_nearest "$tkey" xml "$xy" 2>/dev/null); then
-           prev=${near%$'\t'*}; verdict=${near##*$'\t'}
-           if [ "$verdict" -le 8 ] 2>/dev/null; then verdict=一致; else verdict=变了; fi
-         elif near=$(replay_nearest "$tkey" - "$xy" 2>/dev/null); then
-           prev=${near%%$'\t'*}; verdict=方式变了
-         else
-           prev='-'; verdict=无记录
-         fi ;;
-    ocr) if near=$(replay_nearest "$tkey" ocr "$xy" 2>/dev/null); then
-           prev=${near%$'\t'*}; verdict=${near##*$'\t'}
-           if [ "$verdict" -le 8 ] 2>/dev/null; then verdict=一致; else verdict=变了; fi
-         elif near=$(replay_nearest "$tkey" - "$xy" 2>/dev/null); then
-           prev=${near%%$'\t'*}; verdict=方式变了
-         else
-           prev='-'; verdict=无记录
-         fi ;;
+    # 认到字的三条路一视同仁。10-20 之前这里漏了 band：胶囊档和 band 档明明认到了字，
+    # 却被归到下面「既认不到字又没有兜底」那一档，重放表把修复读成了没修复。
+    hit|ocr|band)
+      m=$method; [ "$m" = hit ] && m=xml
+      if near=$(replay_nearest "$tkey" "$m" "$xy" 2>/dev/null); then
+        prev=${near%$'\t'*}; verdict=${near##*$'\t'}
+        if [ "$verdict" -le 8 ] 2>/dev/null; then verdict=一致; else verdict=变了; fi
+      elif near=$(replay_nearest "$tkey" - "$xy" 2>/dev/null); then
+        prev=${near%%$'\t'*}; verdict=方式变了
+      else
+        prev='-'; verdict=无记录
+      fi ;;
     coord) # 今天认不到字、只能退坐标兜底。点空间不知道时比例没法换算成像素，
            # 这时候只报「有没有兜底」，不比对位置。
            if [ "$xy" = '?' ]; then
