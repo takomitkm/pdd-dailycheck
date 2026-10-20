@@ -60,7 +60,7 @@ replay 有两处抄不动线上，读结果时必须记住：
 
 ## 五、启动即校验
 
-[pdd.sh:266](../pdd.sh#L266) 逐个检查 `COORD_subsidy COORD_bag COORD_light COORD_dialog
+[pdd.sh:275](../pdd.sh#L275) 逐个检查 `COORD_subsidy COORD_bag COORD_light COORD_dialog
 SWIPE_X SWIPE_Y1 SWIPE_Y2 BROWSE_X TOP_SWIPE_Y1 TOP_SWIPE_Y2`：必须是 1 或 2 段
 `0..1` 之间的数。越界、写成像素、写成三段，当场：
 

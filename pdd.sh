@@ -160,6 +160,15 @@ PILL_exchange=$PILL_light
 # 10-11 拿这帧真图扫过 8 个档：只有「裁这颗按钮 + 反色 + 阈值 120 + ×2 + psm 7」读出
 # 干净的「开心收下」，不反色和阈值 150/180/200 那几档全是乱码。
 PILL_take=0.15,0.553,0.849,0.622
+# 频道页那颗「抽福袋」：10-17/10-18/10-20 三天的 rc=6 全栽在它身上 —— BACK 从消费券
+# 浏览页落回百亿补贴频道页，那颗胶囊一直在屏幕上（约 107,888），但整页 psm6 和 band 档
+# 都读不出字，于是 text_present bag 扫满 12 轮认不到，退回固定坐标又被核实路线禁掉。
+# 10-20 拿当天 3 帧真图量的：紧框 + 原色彩（不转灰度、不 autocontrast、不反色）psm 7/11/6
+# 三档全部读出干净的「抽福袋」；同一框转灰度后只剩「最高20元」，反色+阈值只有 psm6 偶然
+# 撞上，band 档那套灰度+autocontrast 一个字都读不出来。同一个框在活动页/首页/消费券页
+# 4 帧上零命中，不会把别的面板误认成胶囊。
+PILL_bag=0.02,0.64,0.32,0.78
+PILL_MODE_bag=color
 PILL_TH=120
 PILL_SCALES="1 2"
 
@@ -802,6 +811,11 @@ pill_pass() { # $1 = key, $2 = 截图 -> finder 结果写 stdout
   local l av ovv ov bsx bsy boxx boyy
   spec=${!v:-}
   [ -n "$spec" ] || return 1
+  # 默认还是「反色 + 硬阈值」那档（深底白字）。PILL_MODE_<key>=color 的控件相反：
+  # 字和底靠颜色分开，一转灰度就糊在一起，10-20 频道页那颗抽福袋就是这种。
+  local mv="PILL_MODE_$key"
+  local mode
+  mode=${!mv:-inv}
   [ "${TAP_W:-0}" -gt 0 ] 2>/dev/null || return 1
   command -v python3 >/dev/null 2>&1 || return 1
   python3 -c 'import PIL' >/dev/null 2>&1 || return 1
@@ -828,18 +842,19 @@ GEOM
   for div in $PILL_SCALES; do
     out="$TMP/pill-$div.png"
     PILL_PNG="$png" PILL_OUT="$out" PILL_BOX="$x0 $y0 $cw $ch" \
-    PILL_DIV="$div" PILL_TH="$PILL_TH" python3 - <<'CROP'
+    PILL_DIV="$div" PILL_TH="$PILL_TH" PILL_MODE="$mode" python3 - <<'CROP'
 from PIL import Image, ImageOps
 import os
-im = Image.open(os.environ["PILL_PNG"]).convert("L")
+im = Image.open(os.environ["PILL_PNG"])
 x, y, w, h = (int(t) for t in os.environ["PILL_BOX"].split())
 g = im.crop((x, y, x + w, y + h))
-k = int(os.environ["PILL_TH"])
 d = int(os.environ["PILL_DIV"])
-bw = ImageOps.invert(g).point(lambda v: 0 if v < k else 255)
+if os.environ.get("PILL_MODE", "inv") != "color":
+    k = int(os.environ["PILL_TH"])
+    g = ImageOps.invert(g.convert("L")).point(lambda v: 0 if v < k else 255)
 if d > 1:
-    bw = bw.resize((bw.width * d, bw.height * d), Image.LANCZOS)
-bw.save(os.environ["PILL_OUT"])
+    g = g.resize((g.width * d, g.height * d), Image.LANCZOS)
+g.save(os.environ["PILL_OUT"])
 CROP
     [ -s "$out" ] || continue
     cp -f "$out" "$RUN_DIR/$bstamp-pill-$key-x$div.png" 2>/dev/null
