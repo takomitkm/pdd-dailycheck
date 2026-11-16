@@ -19,7 +19,7 @@ from pddcheck.perception import (
 )
 from pddcheck.perception.facts import ScreenFacts, facts_from_text
 from pddcheck.perception.observe import XmlPolicy, xml_policy_for
-from pddcheck.storage import DailyStore, Journal
+from pddcheck.storage import DailyStore, EvidenceWriter, Journal
 from pddcheck.vision.engine import OcrEngine
 from pddcheck.vision.source import DeviceVisionSource
 from pddcheck.workflow.flow import RunDeps, RunOutcome, run_once
@@ -86,10 +86,12 @@ class PipelineConfig:
 class _ScreenFromPipeline:
     """把「共享观察 + 事实抽取」包成 run_once 需要的 ScreenPort。"""
 
-    def __init__(self, device, engine: OcrEngine, cfg: PipelineConfig) -> None:
+    def __init__(self, device, engine: OcrEngine, cfg: PipelineConfig,
+                 evidence=None) -> None:
         self._device = device
         self._engine = engine
         self._cfg = cfg
+        self._evidence = evidence
         self._before: ScreenFacts | None = None
         self._tap_point = None
         self.last_facts: ScreenFacts | None = None
@@ -122,6 +124,14 @@ class _ScreenFromPipeline:
                             channels=tuple(channels),
                             xml_policy=xml_policy_for(self._cfg.page_kind))
         self.observe_calls += 1
+        # 证据（T63）：主线路每一帧截图落盘（旧脚本每次观察留证的同款口径）。
+        if self._evidence is not None:
+            try:
+                png = getattr(source, "_pixels", lambda: None)()
+                if png:
+                    self._evidence.shot(png, f"obs-{self.observe_calls:02d}")
+            except Exception as exc:              # noqa: BLE001 — 证据不挡流程
+                self._evidence.errors.append(str(exc))
         results = locate_all(obs, self._cfg.specs, min_conf=40) if self._cfg.specs else {}
         text = "\n".join(obs.ocr_texts.values())
         self._last_raw_text = text          # 浏览页判定用（facts 字段不含任务条文案）
@@ -200,10 +210,19 @@ def _write_tmp_png(data: bytes):
     return Path(fh.name)
 
 
+def _ev_log(evidence, line: str) -> None:
+    """证据 run.log 追加一行（带时间戳）；evidence=None 时是空操作。"""
+    if evidence is None:
+        return
+    from datetime import datetime
+    evidence.log(f"{datetime.now().strftime('%H:%M:%S')} {line}")
+
+
 def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
                   notifier: NotificationSender, journal: Journal | None,
-                  cfg: PipelineConfig, now_ns, lease_factory=None) -> tuple[RunOutcome, dict]:
-    screen = _ScreenFromPipeline(device, engine, cfg)
+                  cfg: PipelineConfig, now_ns, lease_factory=None,
+                  evidence: EvidenceWriter | None = None) -> tuple[RunOutcome, dict]:
+    screen = _ScreenFromPipeline(device, engine, cfg, evidence=evidence)
     stats: dict = {"observe_calls": 0, "stages": []}
 
     # 流程段（可选）：就绪 → 入口 → 福袋；失败以 StageFailure 带 rc 收手，
@@ -261,10 +280,21 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
                                           CoordinateSource.TESSERACT_PAGE),
                                 xml_policy=XmlPolicy.SKIP)
             stats["observe_calls"] += 1
+            # 证据（T63）：每一帧截图落盘（失败只记 stats，不挡流程——I11 同款）。
+            if evidence is not None:
+                try:
+                    png = getattr(src, "_pixels", lambda: None)()
+                    if png:
+                        evidence.shot(png, f"stage-{stats['observe_calls']:02d}")
+                except Exception as exc:              # noqa: BLE001 — 证据不挡流程
+                    stats.setdefault("evidence_errors", []).append(str(exc))
             text = " ".join(ln.normalized_text
                             for ln in parse_tsv("\n".join(obs.ocr_texts.values())))
             fs = device.focus()
-            return PageView(fs.focused_package, fs.focused_activity, text)
+            # 定位用**真帧**（逐词 TSV + 几何）——流程段的文字定位/裁片候选全走它。
+            # 存 FrameObservation 本体（locate_all 的入参形状）；合成单行假框的
+            # 词框中心没有意义（2026-11-17 入口假命中 (200,20) 教训）。
+            return PageView(fs.focused_package, fs.focused_activity, text, frame=obs)
 
         runner = StageRunner(read_page, act, policy)
 
@@ -303,6 +333,9 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
                     scale_h=int(getattr(device, "tap_height", 0) or 1280))
                 stats["entry_anchor_candidates"] = [
                     {"xy": list(c.tap_point), "why": c.why} for c in cands]
+                _ev_log(evidence, "anchors: "
+                        + ("; ".join(f"{c.x},{c.y} ({c.anchor_text})" for c in cands)
+                           or "none"))
                 return [(c.x, c.y) for c in cands]
             except Exception as exc:
                 stats.setdefault("anchor_errors", []).append(str(exc))
@@ -355,10 +388,12 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
                 # 不做任何业务动作（没有跳转就没法继续往下认，硬试只会得到误报 rc4/5）。
                 runner.ensure_ready()
                 stats["stages"].append("ready:ok")
+                _ev_log(evidence, "stage ready:ok")
                 from pddcheck.perception.pagekind import classify_page
                 v = read_page()
                 kind = classify_page(v.ocr_text)
                 stats["stages"].append(f"page:{kind.value}")
+                _ev_log(evidence, f"page {kind.value}: {v.ocr_text[:160]}")
                 stats["dry_intent"] = {
                     "subsidy": list(cfg.specs["subsidy"].coord)
                     if cfg.specs.get("subsidy") and cfg.specs["subsidy"].coord else None,
@@ -368,26 +403,36 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
             else:
                 runner.ensure_ready()
                 stats["stages"].append("ready:ok")
+                _ev_log(evidence, "stage ready:ok")
                 # 弹窗清除（用户 11-08 现场口径：屏幕中间「邀请/抽」推广弹窗挡页面）
                 popup_spec = cfg.specs.get("popup")
                 n_pop = runner.dismiss_popup(popup_spec)
                 if n_pop:
                     stats["stages"].append(f"popup:closed{n_pop}")
+                    _ev_log(evidence, f"popup closed x{n_pop}")
                 runner.enter_subsidy(cfg.specs["subsidy"], scroll_to_top=runner.scroll_to_top,
                                      anchor_points=entry_anchor_candidates)
                 stats["stages"].append("entry:ok")
+                _ev_log(evidence, "stage entry:ok")
                 runner.open_bag(cfg.specs["bag"], extra_candidates=bag_pill_candidates)
                 stats["stages"].append("bag:ok")
+                _ev_log(evidence, "stage bag:ok")
         except StageFailure as exc:
             stats["stages"].append(f"failed:rc{exc.rc}")
             stats["stage_failure"] = exc.why
             stats["stage_failure_rc"] = exc.rc
+            _ev_log(evidence, f"stage FAILED rc{exc.rc}: {exc.why}")
         except KeyError as exc:                     # specs 缺键=配置错误，直接报
             stats["stages"].append(f"config_error:{exc}")
+            _ev_log(evidence, f"config_error: {exc}")
 
+    # 通知正文里的「证据 <路径>」指向**本次运行**的目录（T63：旧口径 RUN_DIR）；
+    # 没有证据 writer（测试/dry-run）时保持原值（日期目录，兼容既有正文措辞）。
+    evidence_dir_for_notify = (evidence.declare() if evidence is not None
+                               else cfg.evidence_dir)
     deps = RunDeps(device=device, screen=screen, store=store, journal=journal,
                    notifier=notifier, endpoint=cfg.endpoint,
-                   evidence_dir=cfg.evidence_dir, business_date=cfg.business_date,
+                   evidence_dir=evidence_dir_for_notify, business_date=cfg.business_date,
                    run_id=cfg.run_id, now_ns=now_ns, lease_factory=lease_factory,
                    force=cfg.force, close_app_on_ok=cfg.close_app_on_ok,
                    stage_failure_rc=stats.get("stage_failure_rc"),
@@ -395,7 +440,13 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
                    dry_run=cfg.dry_run,
                    browse_after_light=cfg.browse_after_light,
                    execute_terminal_effects=cfg.execute_terminal_effects,
-                   verify_ladder=cfg.verify_ladder)
+                   verify_ladder=cfg.verify_ladder,
+                   evidence_log=(evidence.log if evidence is not None else None))
     outcome = run_once(deps)
+    _ev_log(evidence, f"run done: exit={int(outcome.exit_code)} lit={outcome.lit} "
+            f"rc={outcome.rc} marker={outcome.marker_written} "
+            f"delivered={outcome.delivered}")
+    if evidence is not None and evidence.errors:
+        stats["evidence_errors"] = list(evidence.errors)
     stats["observe_calls"] = screen.observe_calls
     return outcome, stats

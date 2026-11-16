@@ -8,7 +8,7 @@
 """
 
 from pddcheck.storage.atomic import atomic_write, atomic_write_text
-from pddcheck.storage.daily import DailyStore
+from pddcheck.storage.daily import DailyStore, EvidenceWriter
 from pddcheck.storage.errors import LockBusy
 from pddcheck.storage.journal import Journal, JournalEntry
 
@@ -29,6 +29,7 @@ __all__ = [
     "atomic_write",
     "atomic_write_text",
     "DailyStore",
+    "EvidenceWriter",
     "Journal",
     "JournalEntry",
     "LockBusy",

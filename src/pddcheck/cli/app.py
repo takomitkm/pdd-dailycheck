@@ -31,7 +31,7 @@ def _cmd_run(args) -> CliResult:
     from pddcheck.exits import ExitCode
     from pddcheck.notify import NotificationSender, read_endpoint_file
     from pddcheck.perception import TargetLocateSpec
-    from pddcheck.storage import DailyStore, Journal, LockBusy, acquire_run_lease
+    from pddcheck.storage import DailyStore, EvidenceWriter, Journal, LockBusy, acquire_run_lease
     from pddcheck.vision.engine import TesseractEngine
     import os
 
@@ -49,8 +49,13 @@ def _cmd_run(args) -> CliResult:
         # **关掉这里的坐标兜底**（allow_coord=False），让 stages 的优先级生效：
         # 文字命中 → 锚点推算（可读图标行 + 偏移）→ 标定坐标（最后兜底）。
         # 11-10 实测坐标 (75,715)；11-11 那天版式漂移导致落空 → 锚点更抗漂移。
+        # region 闸（y≥0.30）：首页入口图标恒在屏幕中下部；历史真机 y∈[0.40,0.60]
+        # （11-10 实测 715/1280≈0.56、11-16 实测 622/1280≈0.49）。状态栏/顶部横幅
+        # 一带（y<0.30）绝不可能是入口——2026-11-17 排查的假命中 (200,20) 会被
+        # 这道闸拦在候选层，不再依赖上游不再犯假框错误。
         "subsidy": TargetLocateSpec(key="subsidy", labels=("百亿补贴", "搜索补贴"), min_overlap=3,
-                                    coord=(0.10417, 0.55859), allow_coord=False),
+                                    coord=(0.10417, 0.55859), allow_coord=False,
+                                    region=(0.0, 0.30, 0.35, 0.75)),
         "bag": TargetLocateSpec(key="bag", labels=("抽福袋",), min_overlap=3,
                                 coord=(0.13889, 0.69922)),
         "light": TargetLocateSpec(key="light", labels=("立即点亮",), min_overlap=4),
@@ -110,6 +115,9 @@ def _cmd_run(args) -> CliResult:
         return CliResult(ExitCode.NO_ADB if exc.code in ("adb_failed", "serial_required") else
                          ExitCode.DEVICE_GONE, stderr=f"连接失败：{exc}\n")
     store = DailyStore(ev, home / "Desktop" / "pdd-pause")
+    # 证据落盘（T63，旧 EVIDENCE_DIR/<date>/<HHMMSS>/ 口径）：每帧截图 + run.log。
+    # dry-run 也落（截图是只读的）；写失败只进 stats，绝不挡业务（I11）。
+    evidence = EvidenceWriter(ev, date) if not getattr(args, "dry_run", False) else None
     lease = None
     try:
         lease = acquire_run_lease(state / "run.lock", args.device)
@@ -120,7 +128,7 @@ def _cmd_run(args) -> CliResult:
             device=dev, engine=TesseractEngine(), store=store,
             notifier=NotificationSender(), journal=Journal(state / "journal" / "actions.jsonl"),
             cfg=cfg, now_ns=lambda: __import__("time").monotonic_ns(),
-            lease_factory=None)
+            lease_factory=None, evidence=evidence)
         line = (f"run {date}: exit={int(outcome.exit_code)} lit={outcome.lit} rc={outcome.rc} "
                 f"marker={outcome.marker_written} ledger={outcome.ledger_written} "
                 f"delivered={outcome.delivered} observes={stats['observe_calls']}\n")
@@ -136,6 +144,9 @@ def _cmd_run(args) -> CliResult:
             line += (f"entry_anchors={len(cands)}"
                      + ("".join(f" [{c['xy']}]" for c in cands) if cands else " (无锚点)")
                      + "\n")
+        # 证据目录（T63）：写失败时可见（不挡业务，但查因的人要知道截图没落下来）
+        if stats.get("evidence_errors"):
+            line += f"evidence_errors={stats['evidence_errors']}\n"
         return CliResult(outcome.exit_code, stdout=line)
     finally:
         if lease is not None:

@@ -15,9 +15,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 
-from pddcheck.perception import TargetLocateSpec, locate_all, observe_frame
+from pddcheck.perception import TargetLocateSpec, locate_all
 from pddcheck.perception.facts import facts_from_text
-from pddcheck.perception.observe import XmlPolicy
 from pddcheck.perception.pagekind import PageKind, classify_page
 
 
@@ -33,6 +32,10 @@ class PageView:
     focus_package: str | None
     focus_activity: str | None
     ocr_text: str
+    # 生产路径附带的真实帧（FrameObservation：逐词 TSV + 几何，locate_all 直接收）；
+    # 测试老路径为 None。定位必须走真帧——合成单行假框（_Page）的词框是整页文本
+    # 拼出来的，拿它产点击点会点到假框中心（2026-11-17 排查：入口假命中点 (200,20)）。
+    frame: object | None = None
 
 
 class StagePolicy:
@@ -93,17 +96,14 @@ class StageRunner:
             v = self._read()
             if v.focus_package != self.policy.pkg:
                 break
-            page = _Page(v.ocr_text)
-            # 1) 有关闭词：优先点关闭词
-            if popup_spec is not None:
-                res = locate_all(page.frame("popup"), {"popup": popup_spec},
-                                 min_conf=self.policy.min_conf)
-                r = res["popup"]
-                if r.winning is not None:
-                    self._act("tap", r.winning.tap_point)
-                    self.policy.wait_step()
-                    closed += 1
-                    continue
+            # 1) 有关闭词：优先点关闭词（无真帧时 _locate 返回 None，不点假框）
+            point = self._locate(v, "popup",
+                                 {"popup": popup_spec} if popup_spec is not None else {})
+            if point is not None:
+                self._act("tap", point)
+                self.policy.wait_step()
+                closed += 1
+                continue
             # 2) 弹窗特征（邀请/抽 同时出现）且不在活动页 → 点右上角惯例关闭位
             text = v.ocr_text
             if ("邀请" in text and "抽" in text) and \
@@ -198,20 +198,19 @@ class StageRunner:
             v = self._read()
             if v.focus_package == self.policy.pkg and _in_subsidy_channel(v.ocr_text):
                 return                                     # 已在补贴频道
-            page = _Page(v.ocr_text)
             # **文字定位时禁用坐标兜底**（11-13）：否则 locate_all 会直接给一个
             # CONFIG_COORD 候选当 winner，锚点/坐标分支就永远轮不到。
             # 优先级在这里显式排：文字 → 锚点 → 标定坐标。
+            # 定位走**真帧**（生产 read_page 附带）；无真帧（测试老路径）时
+            # 合成帧只许判定、产不出坐标 → text_point=None（11-17 假框教训）。
             text_spec = (spec if not spec.allow_coord
                          else replace(spec, allow_coord=False))
-            res = locate_all(page.frame("entry"), {spec.key: text_spec},
-                             min_conf=self.policy.min_conf)
-            r = res[spec.key]
+            text_point = self._locate(v, spec.key, {spec.key: text_spec})
             tapped = False
             anchors = list(anchor_points()) if anchor_points is not None else []
             anchors = [c for c in anchors if c]
-            if r.winning is not None:
-                self._act("tap", r.winning.tap_point)
+            if text_point is not None:
+                self._act("tap", text_point)
                 self.policy.wait_step()                   # 等页面跳转（真机实测必需）
                 v2 = self._read()
                 if _in_subsidy_channel(v2.ocr_text):
@@ -252,6 +251,24 @@ class StageRunner:
                     self._act("back", None)                # 退掉遮罩/错页再试
         raise StageFailure(4, "入口连着点还是没进补贴活动页")
 
+    def _locate(self, v: PageView, key: str,
+                specs: dict) -> tuple[int, int] | None:
+        """页面文本定位一个目标 → 点击点；认不到 → None。
+
+        定位必须来自**真帧**（PageView.frame = FrameObservation，逐词 TSV + 几何）
+        ——词框是真字形框，点击点是命中 span 的词框并集中心。没有真帧（测试老路径）
+        时合成帧的「词框」是整页文本拼出来的假框，中心坐标毫无意义 → 一律返回 None
+        （宁可少一路文字定位，绝不点假框中心；2026-11-17 入口假命中 (200,20)）。
+        """
+        frame = v.frame
+        if frame is None or not specs:
+            return None
+        res = locate_all(frame, specs, min_conf=self.policy.min_conf)
+        r = res[key]
+        if r.winning is not None and r.winning.tap_point is not None:
+            return r.winning.tap_point
+        return None
+
     # ---- 福袋：点进福袋页并证明（进度/待兑换/已点亮 任一） ---------------
     def open_bag(self, spec: TargetLocateSpec, *, extra_candidates=None) -> None:
         """extra_candidates：可选供给器 ()->tuple[Candidate,...]，返回裁片通道
@@ -275,11 +292,8 @@ class StageRunner:
                         point = cand.tap_point
                         break
             if point is None:
-                page = _Page(v.ocr_text)
-                res = locate_all(page.frame("bag"), {spec.key: spec},
-                                 min_conf=self.policy.min_conf)
-                r = res[spec.key]
-                point = r.winning.tap_point if r.winning is not None else None
+                # 整页兜底也走真帧；合成帧产不出坐标（见 enter_subsidy 注释）
+                point = self._locate(v, spec.key, {spec.key: spec})
             if point is not None:
                 self._act("tap", point)
                 self.policy.wait_step()
@@ -309,10 +323,11 @@ def _in_subsidy_channel(text: str) -> bool:
 
 
 class _Page:
-    """把一段 OCR 文本包成 locate_all 需要的 ParsedFrame（单通道、无 XML）。
+    """把一段 OCR 文本包成 ParsedFrame 视图——**只许页型/文字判定，不许产坐标**。
 
-    纯文本 → 合成一行 level=5 的 TSV 词行（坐标取固定框）；生产路径不走这里
-    （真实 OCR 给的是 TSV），这里是给流程段做决策用的文本视图。
+    纯文本 → 合成一行 level=5 的 TSV 词行（框是整页文本拼的假框）。生产定位
+    必须走 PageView.frame（真帧）；本类只给「这段文本里有没有 X」一类判定用。
+    假框中心当点击点的教训见 StageRunner._locate（2026-11-17）。
     """
 
     def __init__(self, ocr_text: str) -> None:

@@ -10,6 +10,7 @@ FakeDevice/FakeScreen 在毫秒内跑完整管线。业务失败绝不因通知�
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -101,10 +102,29 @@ class RunDeps:
     # 落频道页认到 bag 再点回活动页、清浮层复读、重进福袋页兜底、奖励浮层点「开心收下」。
     # 默认 False（47 案基线只喂 AFTER_DIRECT）；CLI 真机路径显式开启。
     verify_ladder: bool = False
+    # 证据 run.log 追加回调（T63，2026-11-17）：None=不落（47 案基线/测试）。
+    # 业务动作与收尾的关键事件逐行落 run.log——11-14/15 连续 rc4 无法定位的教训。
+    # 回调内部自己的 I/O 失败由实现方吞掉；这里绝不因落盘失败改业务 rc（I11）。
+    evidence_log: object | None = None
 
 
 def _exit(rc: int, lit: int | None) -> ExitCode:
     return exit_for_outcome(rc=rc, lit=lit)
+
+
+def _evlog(deps: RunDeps, line: str) -> None:
+    """证据 run.log 追加（evidence_log=None 时空操作）；失败绝不外抛（I11）。
+
+    落盘失败本身就是 evidence.errors 里的事实，这里不需要再记——
+    证据是附属品，任何异常都不允许污染业务 rc（I11 的证据版）。
+    """
+    log = getattr(deps, "evidence_log", None)
+    if log is None:
+        return
+    try:
+        log(line)
+    except Exception as _exc:                        # noqa: BLE001 — 证据不挡业务（I11）
+        print(f"evidence log failed (ignored): {_exc}", file=sys.stderr)
 
 
 def run_once(deps: RunDeps) -> RunOutcome:
@@ -133,12 +153,17 @@ def run_once(deps: RunDeps) -> RunOutcome:
         pre = None
         if stage_rc is not None:
             notes.append(f"阶段失败 rc={stage_rc}：{getattr(deps, 'stage_failure_why', '')}")
+            _evlog(deps, f"stage_failure rc={stage_rc}: {getattr(deps, 'stage_failure_why', '')}")
         else:
             try:
                 facts = deps.screen.light_facts()
+                _evlog(deps, f"light_facts: done={facts.get('done_text')} "
+                       f"exchange={facts.get('exchange_text')} pend={facts.get('pend_text')} "
+                       f"before={facts.get('before_count')} tap={facts.get('tap_point')}")
             except StageFailure as exc:
                 stage_rc = exc.rc
                 notes.append(f"阶段失败 rc={exc.rc}：{exc.why}")
+                _evlog(deps, f"stage_failure rc={exc.rc}: {exc.why}")
 
         lit: int | None = None
         rc = 0
@@ -171,6 +196,7 @@ def run_once(deps: RunDeps) -> RunOutcome:
                     lit = 0
                 else:
                     notes.append("定位不到「立即点亮」→ 按浏览任务处理（滑 15s 后核实）")
+                    _evlog(deps, "light target not found -> browse-then-verify")
                     swipe_ok = _browse_after_light(deps, notes)
                     obs = _verify_after_light(deps, notes, browsed=True,
                                               verify_ladder=getattr(deps, "verify_ladder", False))
@@ -178,9 +204,11 @@ def run_once(deps: RunDeps) -> RunOutcome:
                     rc, lit = decision.rc, decision.lit
                     notes.append(f"核实：{decision.proof_kind.value} — {decision.why}"
                                  + ("（浏览滑动已执行）" if swipe_ok else ""))
+                    _evlog(deps, f"verify: {decision.proof_kind.value} {decision.why}")
             else:
                 # 4) 点亮一枪 + 核实
                 intent = _make_tap_intent(deps, facts)
+                _evlog(deps, f"tap light at {facts.get('tap_point')}")
                 receipt = deps.device.execute(intent, facts.get("tap_point"))
                 if deps.journal is not None:
                     deps.journal.record_intent(intent.action_id, "tap",
@@ -201,6 +229,7 @@ def run_once(deps: RunDeps) -> RunOutcome:
                                               verify_ladder=getattr(deps, "verify_ladder", False))
                     decision = verify_light_decision(pre.before_count, facts.get("tap_method", "ocr"), obs)
                     rc, lit = decision.rc, decision.lit
+                    _evlog(deps, f"verify: {decision.proof_kind.value} {decision.why}")
                     if decision.tap_point is not None and not deps.dry_run:
                         # G3：奖励浮层在场=点着了的凭据，顺手把「开心收下」点掉
                         #（契约 L197：只有奖励浮层证明分支允许 take；判定核给点才许点）
@@ -228,15 +257,18 @@ def run_once(deps: RunDeps) -> RunOutcome:
                 if plan.marker_write:
                     deps.store.write_marker(deps.business_date)
                     marker_written = True
+                    _evlog(deps, f"marker written: .done-{deps.business_date}")
                 if plan.ledger_write is not None:
                     ok = deps.store.ledger_write(plan.ledger_write)
                     if not ok:
                         raise OSError("账本写入失败")
                     ledger_written = plan.ledger_write
+                    _evlog(deps, f"ledger written: {ledger_written}")
             except OSError as exc:
                 # D04：业务成功但状态落盘失败 → 进程码 73，业务 rc 另存，绝不虚称已写
                 operational_failed = True
                 notes.append(f"状态写入失败（operational）：{exc}")
+                _evlog(deps, f"state write FAILED: {exc}")
 
         # 6) 终态效果执行（生产教训：terminal_plan 早就算出 close/final_scroll，
         #    但执行器只把它当字符串写进 RunOutcome、从不真正下发 → 跑成功既不关 app、
@@ -249,6 +281,7 @@ def run_once(deps: RunDeps) -> RunOutcome:
             # last_activity 必须在关 app 之前读（pdd.sh L1622：按完 HOME 就只剩桌面了）。
             last_activity = _read_last_activity(deps)
             _apply_close_policy(deps, plan, notes)
+            _evlog(deps, f"close: {plan.close_policy.value} last_activity={last_activity}")
             # 证据保留（G9：旧 prune_evidence；失败只记 notes，不改业务 rc）
             if getattr(deps, "keep_days", None):
                 try:
@@ -271,6 +304,7 @@ def run_once(deps: RunDeps) -> RunOutcome:
             delivery = DeliveryResult(DeliveryStatus.SKIPPED, 0, None, "dry-run")
         else:
             delivery = deps.notifier.send(deps.endpoint, title, body)
+        _evlog(deps, f"notify: {delivery.status.value} title={title}")
 
         if operational_failed:
             return RunOutcome(ExitCode.STATE_DIR_FAILED, lit, business_rc, title, body,
