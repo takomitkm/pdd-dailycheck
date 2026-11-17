@@ -148,6 +148,15 @@ def _cmd_run(args) -> CliResult:
         if stats.get("evidence_errors"):
             line += f"evidence_errors={stats['evidence_errors']}\n"
         return CliResult(outcome.exit_code, stdout=line)
+    except Exception:
+        # 11-18 铁律兜底：任何未预期异常都不能把 PDD 留在手机上——
+        # 进程级最后防线（run_once 内部的核验挡不住这里炸出去的路径）。
+        if not bool(getattr(args, "dry_run", False)):
+            try:
+                dev.execute_stop_raw()
+            except Exception as stop_exc:   # noqa: BLE001 — 兜底失败打 stderr，不掩盖原异常
+                print(f"emergency force-stop failed (ignored): {stop_exc}", file=sys.stderr)
+        raise
     finally:
         if lease is not None:
             lease.release()

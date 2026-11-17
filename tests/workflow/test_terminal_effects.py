@@ -98,27 +98,32 @@ def test_success_runs_final_scroll_then_stop_and_home(tmp_path):
 
 
 def test_rc6_only_home_no_final_scroll_no_stop(tmp_path):
-    """rc≠0 收尾只有 HOME（B07：不 force-stop），绝不做最终下滑。"""
+    """rc≠0 失败收尾：不做最终下滑；11-18 铁律后 force-stop 也下发（废 B07）。"""
     d, rec, _ = deps(tmp_path, facts=SUCCESS, obs=RC6_OBS, effects=True,
                      browse_sleep=lambda s: None)
     out = run_once(d)
     assert out.rc == 6 and not out.marker_written
     kinds = [k for k, _ in rec.actions]
     assert "swipe" not in kinds
-    assert kinds == ["tap", "home"]
+    assert kinds == ["tap", "stop", "home"]
 
 
-def test_lit2_and_lit4_stay_no_terminal_actions(tmp_path):
-    """lit2/4：手机停在当前屏等她，一个键都不放（I02/I13）。"""
+def test_lit2_and_lit4_still_force_closed(tmp_path):
+    """11-18 铁律：lit2/4 旧「留屏不关 app」（I02/I13）废除——照样 stop+home。
+
+    （旧断言 rec.actions == [] 已随铁律更新；「立即兑换」那天脚本自己会再开 app。）
+    """
     d2, rec2, _ = deps(tmp_path, facts={"exchange_text": "立即兑换"}, effects=True)
     out2 = run_once(d2)
-    assert out2.lit == 2 and out2.close_policy == "stay"
-    assert rec2.actions == []
+    assert out2.lit == 2 and out2.close_policy == "stop_and_home"
+    kinds2 = [k for k, _ in rec2.actions]
+    assert kinds2 == ["stop", "home"]
     d4, rec4, _ = deps(tmp_path, facts={"pend_text": "待兑换", "pend_days": 3},
                        effects=True)
     out4 = run_once(d4)
-    assert out4.lit == 4 and out4.close_policy == "stay"
-    assert rec4.actions == []
+    assert out4.lit == 4 and out4.close_policy == "stop_and_home"
+    kinds4 = [k for k, _ in rec4.actions]
+    assert kinds4 == ["stop", "home"]
 
 
 def test_baseline_default_off_keeps_47case_behaviour(tmp_path):
@@ -168,7 +173,7 @@ def test_rc6_body_falls_back_to_du_bu_dao(tmp_path):
     out = run_once(d)
     assert out.rc == 6
     assert "最后停在 读不到 这一屏" in out.body
-    assert [k for k, _ in rec.actions] == ["tap", "home"]   # 收尾不受影响
+    assert [k for k, _ in rec.actions] == ["tap", "stop", "home"]   # 11-18 铁律：失败也关
 
 
 # --------------------------------------------------------------- G9 prune
@@ -211,3 +216,129 @@ def test_prune_zero_keep_days_is_noop(tmp_path):
     os.utime(old, (1_000_000_000, 1_000_000_000))
     run_once(d)
     assert old.exists()                                   # keep_days=0 不清理
+
+
+# ----------------------------------------------------- 11-18 铁律：确保关掉了
+
+
+class PidDevice:
+    """包一层 RecordingDevice，注入 pidof 原语（模拟真机 pidof）。
+
+    pids 队列每次 pid_of() 弹出一个；耗尽后**保持最后一个值**——
+    队列耗尽 ≠ 进程消失，别把「没喂答案」误当「已关闭」。
+    """
+
+    def __init__(self, rec, pids):
+        self._rec = rec
+        self._pids = list(pids) if pids else [None]
+        self._last = self._pids[-1]
+
+    def execute(self, intent, point=None):
+        return self._rec.execute(intent, point)
+
+    def focus(self):
+        return self._rec.focus()
+
+    def pid_of(self):
+        if self._pids:
+            self._last = self._pids.pop(0)
+        return self._last
+
+    @property
+    def state_epoch(self):
+        return self._rec.state_epoch
+
+    @property
+    def tap_width(self):
+        return self._rec.tap_width
+
+    @property
+    def tap_height(self):
+        return self._rec.tap_height
+
+
+def deps_with_pid(tmp_path, pids, **kw):
+    d, rec, store = deps(tmp_path, **kw)
+    dev = PidDevice(rec, pids)
+    d.device = dev
+    return d, dev, store
+
+
+def test_skip_marker_path_still_closes_app(tmp_path):
+    """11-18 铁律：标记已存在早退也要关 app（昨天 10:00 就是它把 PDD 留在前台的）。"""
+    d, dev, store = deps_with_pid(tmp_path, [None], effects=True)
+    store.write_marker("2026-11-07")          # 先写标记 → run_once 走早退
+    out = run_once(d)
+    assert out.skipped == "daily_marker"
+    assert [k for k, _ in dev._rec.actions] == ["stop"]   # 只 stop，无 HOME 也无业务动作
+    assert any("早退兜底" in n for n in out.notes)
+
+
+def test_skip_marker_dry_run_does_not_close(tmp_path):
+    """dry-run 连早退兜底关 app 都不做（纯观察口径不变）。"""
+    d, dev, store = deps_with_pid(tmp_path, [None], effects=True, dry_run=True)
+    store.write_marker("2026-11-07")
+    out = run_once(d)
+    assert out.skipped == "daily_marker"
+    assert dev._rec.actions == []
+
+
+def test_pidof_confirms_closed_no_retry(tmp_path):
+    """stop → pidof=None：一次关掉，不重试，核验句进 notes。"""
+    d, dev, _ = deps_with_pid(tmp_path, [None], facts=SUCCESS, obs=SUCCESS_OBS,
+                              effects=True, browse_sleep=lambda s: None)
+    out = run_once(d)
+    kinds = [k for k, _ in dev._rec.actions]
+    # 1 次 stop（收尾）+ home + 核验不再 stop（已死）
+    assert kinds.count("stop") == 1
+    assert kinds[-1] == "home"
+    assert any("已关闭" in n or "进程已死" in n for n in out.notes)
+
+
+def test_pidof_alive_retries_then_reports(tmp_path):
+    """stop 后进程还在：收尾重试 + 核验兜底再关；两次都活着 → 推送里喊出来。"""
+    d, dev, _ = deps_with_pid(tmp_path, [123, 456, 789],
+                              facts=SUCCESS, obs=SUCCESS_OBS,
+                              effects=True, browse_sleep=lambda s: None)
+    out = run_once(d)
+    kinds = [k for k, _ in dev._rec.actions]
+    # 收尾 _force_close_verified 2 次 + 核验兜底 2 次 = 4 次 stop
+    assert kinds.count("stop") == 4
+    assert out.title.startswith("PDD")        # 业务标题不变
+    assert "没能关掉" in out.body
+    assert any("没关掉" in n for n in out.notes)
+
+
+def test_pidof_alive_recovered_on_verify(tmp_path):
+    """收尾第一次没死、核验兜底关掉了：正文报平安。"""
+    d, dev, _ = deps_with_pid(tmp_path, [111, None],
+                              facts=SUCCESS, obs=SUCCESS_OBS,
+                              effects=True, browse_sleep=lambda s: None)
+    out = run_once(d)
+    kinds = [k for k, _ in dev._rec.actions]
+    # 收尾 1 次（111→活，无重试间隔外的第二次因为第一次就验死了……实际：
+    # 收尾 _force_close_verified 第一发 stop 后 pid=111 还活着 → 第二发 stop
+    # 后 pid=None 已死）→ 核验直接确认。共 2 次 stop。
+    assert kinds.count("stop") == 2
+    assert "已关闭" in out.body
+
+
+def test_no_pid_of_primitive_treated_as_closed(tmp_path):
+    """FakeDevice 没有 pid_of：验证原语缺失按「已执行」处理，不喊失败。"""
+    d, rec, _ = deps(tmp_path, facts=SUCCESS, obs=SUCCESS_OBS, effects=True,
+                     browse_sleep=lambda s: None)
+    out = run_once(d)
+    kinds = [k for k, _ in rec.actions]
+    assert kinds[-2:] == ["stop", "home"]
+    assert "没能关掉" not in out.body
+
+
+def test_close_failure_does_not_change_business_rc(tmp_path):
+    """关不掉不改业务 rc（I11 的铁律版）：rc0 & lit3 照旧、marker 照写。"""
+    d, _, store = deps_with_pid(tmp_path, [1, 2, 3, 4],
+                                facts=SUCCESS, obs=SUCCESS_OBS,
+                                effects=True, browse_sleep=lambda s: None)
+    out = run_once(d)
+    assert out.rc == 0 and out.lit == 3
+    assert out.marker_written
+    assert (store.evidence_root / ".done-2026-11-07").exists()

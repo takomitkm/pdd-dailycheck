@@ -82,9 +82,13 @@ def test_done_text_is_lit1_and_writes_marker(tmp_path):
 
 
 def test_exchange_is_lit2_stays(tmp_path):
+    """11-18 铁律：lit2 旧「stay」废除——close_policy 统一 stop_and_home。
+
+    （effects=False 基线仍只算计划不下发；真机关闭在 execute_terminal_effects 路径。）
+    """
     out = run_once(deps(tmp_path, facts={"exchange_text": "立即兑换", "before_count": 4}))
     assert out.exit_code is ExitCode.OK and out.lit == 2
-    assert not out.marker_written and out.close_policy == "stay"
+    assert not out.marker_written and out.close_policy == "stop_and_home"
 
 
 def test_pending_is_lit4_records_ledger(tmp_path):
@@ -104,7 +108,8 @@ def test_counter_unchanged_is_rc6_no_marker(tmp_path):
     obs = (VerifyObservation(VerifyStage.AFTER_DIRECT, after_count=4),)
     out = run_once(deps(tmp_path, facts={"before_count": 4, "tap_point": (100, 900)}, obs=obs))
     assert out.exit_code is ExitCode.LIGHT_NOT_APPLIED and out.rc == 6
-    assert not out.marker_written and out.close_policy == "home_only"
+    # 11-18 铁律：rc≠0 也 force-stop（计划层；废 B07 的 home_only）
+    assert not out.marker_written and out.close_policy == "stop_and_home"
 
 
 def test_unknown_execution_not_retried(tmp_path):

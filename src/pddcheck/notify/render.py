@@ -25,21 +25,38 @@ class NotifyInput:
     verify_why: str = ""               # rc6 的原因
     last_activity: str | None = None   # 收尾前最后前台（None/空 → 「读不到」）
     proof_kind: str = ""               # 判定核给的证据档（正文措辞参考）
+    app_closed: bool | None = None     # 11-18 铁律：收尾后 pidof 核验（None=没跑核验路径）
 
 
 def _last_act(last_activity: str | None) -> str:
     return last_activity or "读不到"
 
 
+def _close_line(app_closed: bool | None) -> str:
+    """11-18 铁律的收尾一句：核验过=报平安，核验失败=大声喊。"""
+    if app_closed is True:
+        return "拼多多已关闭（进程核验过）。"
+    if app_closed is False:
+        return "⚠️ 拼多多没能关掉（force-stop 后进程还在），需要你手动关一下。"
+    return ""
+
+
 def render_notification(inp: NotifyInput) -> tuple[str, str]:
-    """返回 (title, body)。分支与 cmd_run L1644-1672 一致。"""
+    """返回 (title, body)。分支与 cmd_run L1644-1672 一致。
+
+    11-18 铁律：每个分支末尾都带 app 关闭核验句（app_closed=None 时无——
+    dry-run/未开终态效果的场合不虚报）。
+    """
     title = notify_title(rc=inp.rc, lit=inp.lit, done_word=inp.done_word)
     ev = inp.evidence_dir
+    close = _close_line(inp.app_closed)
     if inp.lit == 2:
         body = (
             "走到点亮那一步，屏幕上写的是「立即兑换」，脚本不代点。\n"
-            "app 和这一屏都给你留着，直接接手就行。\n"
+            "按旧约定这一屏给你留着接手；按 11-18 新约定 app 已统一关掉，\n"
+            "明天同一时间照常自己跑。\n"
             f"{inp.exc_msg}\n"
+            f"{close}\n"
             f"证据 {ev}"
         )
         return title, body
@@ -48,9 +65,10 @@ def render_notification(inp: NotifyInput) -> tuple[str, str]:
         body = (
             f"进度那一行（原来写着「N天内点亮X次必得」）没了，现在是：{line}\n"
             f"{inp.pend_msg}\n"
-            "今天的完成标记已写。这一轮没在手机上多点一个字、多按一个键，"
-            "app 就停在刚读到这句话的这一屏 —— 等到屏幕上换成「立即兑换」那天，"
+            "今天的完成标记已写。本轮已把拼多多关掉（旧「app 留在屏上等兑换」"
+            "口径 11-18 起废除）；等到屏幕上换成「立即兑换」那天，"
             "推送标题换成「需人工」，那一下同样只喊你不代点。\n"
+            f"{close}\n"
             f"证据 {ev}"
         )
         return title, body
@@ -59,19 +77,21 @@ def render_notification(inp: NotifyInput) -> tuple[str, str]:
             first = f"屏幕上写着「{inp.done_word or '已点亮/已使用'}」，没重复点，也没往下点"
         else:
             first = "三步点完，活动页那行进度核实过 + 下滑跑完"
-        body = f"{first}\n步骤 {inp.steps}\n证据 {ev}"
+        body = f"{first}\n步骤 {inp.steps}\n{close}\n证据 {ev}"
         return title, body
     if inp.rc == 6:
         why = inp.verify_why or "点完了但屏幕上进度行的次数没变小"
         body = (
             f"{why}\n"
             "当失败处理，没写今天的完成标记，明天会自己再来一遍。\n"
-            f"最后停在 {_last_act(inp.last_activity)} 这一屏，证据 {ev}"
+            f"最后停在 {_last_act(inp.last_activity)} 这一屏，{close}\n"
+            f"证据 {ev}"
         )
         return title, body
     body = (
         f"最后停在 {_last_act(inp.last_activity)} 这一屏"
         "（登录页/验证码之类也长这样，脚本不代填）。\n"
+        f"{close}\n"
         f"看 {ev}/run.log"
     )
     return title, body

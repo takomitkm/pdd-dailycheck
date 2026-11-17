@@ -106,15 +106,17 @@ def test_terminal_lit1_plain_title_case09():
 
 
 def test_terminal_lit2_stays_case10():
+    """11-18 铁律：lit2 旧「留屏不关」（case10/I02）废除——照样 STOP_AND_HOME。"""
     p = terminal_plan(rc=0, lit=2, ledger_current=1)
     assert not p.marker_write and p.ledger_write == 0       # 倒数作废
-    assert p.close_policy is ClosePolicy.STAY and not p.final_scroll
+    assert p.close_policy is ClosePolicy.STOP_AND_HOME and not p.final_scroll
     assert p.notify_title == "PDD 需人工"
 
 
 def test_terminal_lit4_pend_days_copy_and_roll():
+    """11-18 铁律：lit4 旧「留屏不关」废除；标记/账本口径不变。"""
     p = terminal_plan(rc=0, lit=4, pend_days=3)              # case26：屏幕 3 照抄（账 9 也照抄）
-    assert p.marker_write and p.ledger_write == 3 and p.close_policy is ClosePolicy.STAY
+    assert p.marker_write and p.ledger_write == 3 and p.close_policy is ClosePolicy.STOP_AND_HOME
     p = terminal_plan(rc=0, lit=4, pend_days=None, ledger_current=3)   # case25：账 3 减 1
     assert p.ledger_write == 2
     p = terminal_plan(rc=0, lit=4, pend_days=None, ledger_current=None)  # case23：一个字不写
@@ -127,7 +129,8 @@ def test_terminal_lit4_pend_days_copy_and_roll():
 def test_terminal_rc6_case34():
     p = terminal_plan(rc=6, lit=None)
     assert not p.marker_write and p.ledger_write is None
-    assert p.close_policy is ClosePolicy.HOME_ONLY and not p.final_scroll   # B07：只有 HOME
+    # 11-18 铁律：rc≠0 也 force-stop（废 B07 的 HOME_ONLY）
+    assert p.close_policy is ClosePolicy.STOP_AND_HOME and not p.final_scroll
     assert p.notify_title == "PDD ⬛ 退出码 6"
 
 

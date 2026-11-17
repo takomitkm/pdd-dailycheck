@@ -141,6 +141,33 @@ class AdbDevice:
         png_size(c.out)                     # 严格解码校验
         return c.out
 
+    def pid_of(self) -> int | None:
+        """app 主进程号（pidof）；进程不在/读不到 → None。
+
+        收尾验证用（11-18 铁律「确保关掉了」）：force-stop 后 pid 必须消失，
+        还在就是没关掉。读不到与「没有进程」同待遇——验证放行只认明确的空。
+        """
+        c = self._adb("shell", "pidof", self.pkg)
+        if c.rc != 0:
+            return None                     # pidof 无命中 rc=1：进程确实不在
+        text = c.out.decode("utf-8", "replace").strip()
+        if not text:
+            return None
+        try:
+            return int(text.split()[0])
+        except ValueError:
+            return None
+
+    def execute_stop_raw(self) -> None:
+        """裸 force-stop：不走 intent 校验（epoch/deadline 会拒掉崩溃时刻的动作）。
+
+        只给 _cmd_run 的异常兜底用（11-18 铁律：崩溃也不能把 PDD 留在手机上）。
+        失败抛 AdbError，由调用方决定吞不吞。
+        """
+        c = self._adb("shell", "am", "force-stop", self.pkg)
+        if c.rc != 0:
+            raise AdbError("force_stop_failed", c.err.decode("utf-8", "replace")[:200])
+
     def _classify(self, pkg: str, act: str, text: str) -> WindowKind:
         if "keyguard" in act.lower() or "StatusBar" in pkg:
             return WindowKind.KEYGUARD if "keyguard" in act.lower() else WindowKind.STATUSBAR

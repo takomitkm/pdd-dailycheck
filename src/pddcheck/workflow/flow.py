@@ -20,7 +20,7 @@ from pddcheck.domain import ActionKind, ActionIntent, ExecutionStatus, WindowKin
 from pddcheck.notify import NotificationSender, NotifyInput, render_notification
 from pddcheck.storage import DailyStore, Journal, LockBusy
 from pddcheck.workflow.check_before import CheckBeforeKind, check_done_before_decision
-from pddcheck.workflow.terminal import ClosePolicy, terminal_plan
+from pddcheck.workflow.terminal import terminal_plan
 from pddcheck.workflow.verify import (
     VerifyObservation,
     VerifyStage,
@@ -141,8 +141,12 @@ def run_once(deps: RunDeps) -> RunOutcome:
     try:
         # 2) 日标记（--force 只跳过它，不跳锁/焦点/人工兑换边界——I10）
         if not deps.force and deps.store.marker_exists(deps.business_date):
+            # 11-18 铁律：早退也要关 app——昨天 10:00 就是这条路径把 PDD 留在前台的
+            #（凌晨成功写标记后，定时跑进这里直接 return，前面 ready 段已把 PDD 拉起）。
+            _force_close_quiet(deps, notes, why="早退（标记已存在）")
             return RunOutcome(ExitCode.OK, None, 0, "PDD 已完成（今日）", "标记已存在",
-                              skipped="daily_marker", notes=("日标记已存在，未动作",))
+                              skipped="daily_marker",
+                              notes=tuple(notes) + ("日标记已存在，未动作",))
         if deps.force and deps.store.marker_exists(deps.business_date):
             notes.append("--force：跳过日标记，其它边界照旧")
 
@@ -272,9 +276,12 @@ def run_once(deps: RunDeps) -> RunOutcome:
 
         # 6) 终态效果执行（生产教训：terminal_plan 早就算出 close/final_scroll，
         #    但执行器只把它当字符串写进 RunOutcome、从不真正下发 → 跑成功既不关 app、
-        #    也不做 I06 要求的最终 20 次下滑。这里补上，且严格按旧脚本收尾纪律：
-        #    rc0=force-stop+HOME；rc≠0=只 HOME；lit2/4=留在屏前一个键都不放。）
+        #    也不做 I06 要求的最终 20 次下滑。这里补上。
+        #    11-18 用户铁律：不管成功与失败都关掉拼多多并**确保关掉**——
+        #    STOP 后用 pidof 验证进程真死，关不掉在推送里喊出来；lit2/4 旧「留屏」
+        #    约定废除（等「立即兑换」那天来的时候，脚本反正自己会再开 app）。）
         last_activity = None
+        app_closed_ok: bool | None = None
         if getattr(deps, "execute_terminal_effects", False) and not deps.dry_run:
             if plan.final_scroll and business_rc == 0:
                 _final_scroll(deps, notes)
@@ -291,14 +298,22 @@ def run_once(deps: RunDeps) -> RunOutcome:
                 except Exception as exc:
                     notes.append(f"证据清理失败（忽略）：{exc}")
 
-        # 7) 通知（失败不改业务 rc——I11）
+        # 7) 关闭核验（11-18 铁律的第二道闸：上面任何路径没关成，这里再兜一次；
+        #    dry-run/未开终态效果/锁冲突 75 不进——75 另一个实例可能正在跑）
+        if (not deps.dry_run and getattr(deps, "execute_terminal_effects", False)
+                and business_rc != 75):
+            app_closed_ok = ensure_app_closed(deps, notes)
+            _evlog(deps, f"close_verify: closed={app_closed_ok}")
+
+        # 8) 通知（失败不改业务 rc——I11）
         title, body = render_notification(NotifyInput(
             rc=business_rc, lit=lit, evidence_dir=deps.evidence_dir,
             steps=deps.steps_label, done_word=done_word,
             pend_days=facts.get("pend_days"),
             pend_line=facts.get("pend_line"),
             pend_msg="", exc_msg="", verify_why="",
-            last_activity=last_activity))
+            last_activity=last_activity,
+            app_closed=app_closed_ok))
         if deps.dry_run:
             from pddcheck.notify import DeliveryResult, DeliveryStatus
             delivery = DeliveryResult(DeliveryStatus.SKIPPED, 0, None, "dry-run")
@@ -511,24 +526,81 @@ def _read_last_activity(deps: RunDeps) -> str | None:
 def _apply_close_policy(deps: RunDeps, plan, notes: list) -> None:
     """下发 close_policy（迁移审计 G4：terminal_plan 早就算好却从未执行）。
 
-    旧脚本收尾纪律（cmd_run L1628-1637）：
-    - STOP_AND_HOME：force-stop + HOME（rc0 正常完成）；
-    - HOME_ONLY：只按 HOME（rc≠0，B07：失败路径不 force-stop）；
-    - STAY：lit2/4 手机停在当前屏等她，一个键都不放。
+    11-18 铁律（用户定）：不管成功与失败都关掉拼多多，**并确保关掉**——
+    - STOP（force-stop）→ pidof 验证进程消失 → 没死再 stop 一次 → 还不行记 notes；
+    - 收尾 HOME 回桌面（关不关得掉都回，别把桌面留在 PDD 上）；
+    - close_policy 现恒为 STOP_AND_HOME；STAY/HOME_ONLY 枚举只剩兼容意义。
     单个动作失败只记 notes，不改业务 rc（终态收尾不影响判定，I11 同理）。
     """
+    closed_ok = _force_close_verified(deps, notes, reason="收尾关 app")
+    if closed_ok:
+        notes.append("收尾：force-stop（pidof 验证进程已死）+ HOME")
+    else:
+        notes.append("收尾：force-stop 后进程仍存活——**没关掉**，下一轮会再关")
     try:
-        if plan.close_policy is ClosePolicy.STOP_AND_HOME:
-            deps.device.execute(_stage_intent(deps, ActionKind.STOP, "正常完成，关掉 app"))
-            deps.device.execute(_stage_intent(deps, ActionKind.HOME, "关 app 后回桌面"))
-            notes.append("收尾：force-stop + HOME")
-        elif plan.close_policy is ClosePolicy.HOME_ONLY:
-            deps.device.execute(_stage_intent(deps, ActionKind.HOME, "失败收尾只按 HOME"))
-            notes.append("收尾：HOME")
-        else:                                     # STAY：lit2/4 一个键都不放
-            notes.append("收尾：留在当前屏（lit2/4 不关 app）")
+        deps.device.execute(_stage_intent(deps, ActionKind.HOME, "关 app 后回桌面"))
     except Exception as exc:                      # 收尾失败不污染业务结果
-        notes.append(f"收尾动作失败（忽略）：{exc}")
+        notes.append(f"收尾 HOME 失败（忽略）：{exc}")
+
+
+def _force_close_verified(deps: RunDeps, notes: list, *, reason: str,
+                          tries: int = 2, wait_s: float = 1.5) -> bool:
+    """force-stop + pidof 验证（11-18 铁律「确保关掉了」的核心）。
+
+    返回 True=进程确认死亡；False=重试后仍在（或不肯回答）。设备不支持
+    pid_of（FakeDevice/老适配器）时退化为「stop 动作被执行过」。
+    """
+    pid_of = getattr(deps.device, "pid_of", None)
+    for attempt in range(1, tries + 1):
+        try:
+            deps.device.execute(_stage_intent(deps, ActionKind.STOP, f"{reason}（第 {attempt} 次）"))
+        except Exception as exc:
+            notes.append(f"{reason}：stop 被拒（{exc}）")
+        if pid_of is None:
+            return True                           # 无验证原语：按已执行处理
+        try:
+            alive = pid_of()
+        except Exception as exc:
+            notes.append(f"{reason}：pidof 验证失败（{exc}）")
+            return False
+        if alive is None:
+            return True
+        if attempt < tries:
+            time.sleep(wait_s)                    # 给系统一点杀进程的时间再验
+    return False
+
+
+def _force_close_quiet(deps: RunDeps, notes: list, *, why: str) -> None:
+    """早退路径的兜底关 app（不发通知、不改 rc；11-18 铁律覆盖早退）。
+
+    dry-run / 未开终态效果 / 设备不支持 stop 时静默跳过。
+    """
+    if deps.dry_run or not getattr(deps, "execute_terminal_effects", False):
+        return
+    try:
+        closed = _force_close_verified(deps, notes, reason=f"早退兜底关 app（{why}）")
+        _evlog(deps, f"early_exit_close: {why} closed={closed}")
+        notes.append(f"早退兜底：app {'已关闭' if closed else '关闭失败（进程仍在）'}")
+    except Exception as exc:
+        notes.append(f"早退兜底关 app 失败（忽略）：{exc}")
+
+
+def ensure_app_closed(deps: RunDeps, notes: list) -> bool:
+    """关闭核验 + 兜底（收尾段之后的第二道闸）：pidof 还活着就再 stop 一轮。
+
+    返回 True=当前确认已死；False=两次兜底后仍在（调用方把这件事喊进推送）。
+    """
+    pid_of = getattr(deps.device, "pid_of", None)
+    if pid_of is None:
+        return True                               # 无验证原语：无可核验
+    try:
+        if pid_of() is None:
+            return True
+    except Exception as exc:
+        notes.append(f"关闭核验：pidof 读失败（{exc}）")
+        return False
+    closed = _force_close_verified(deps, notes, reason="关闭核验兜底再关", tries=2)
+    return closed
 
 
 def _final_scroll(deps: RunDeps, notes: list) -> None:
