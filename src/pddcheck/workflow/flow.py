@@ -588,19 +588,35 @@ def _force_close_quiet(deps: RunDeps, notes: list, *, why: str) -> None:
 def ensure_app_closed(deps: RunDeps, notes: list) -> bool:
     """关闭核验 + 兜底（收尾段之后的第二道闸）：pidof 还活着就再 stop 一轮。
 
-    返回 True=当前确认已死；False=两次兜底后仍在（调用方把这件事喊进推送）。
+    03:04 真机复盘（0.1.50）：force-stop 后 pidof 空、核验过，但 1~2s 后 PDD 的
+    `:titan` 常驻子进程用排好的 wakeup alarm（ALARM_ACTION）把主进程**重新拉活**——
+    收尾关进程与 alarm 触发存在竞态。所以核验不能只验一次：**等 3s 再验一次**，
+    又活了就再杀一轮（最多 3 轮），仍活着才认输（推送喊话）。
+
+    返回 True=当前确认已死（且 3s 复核仍死）；False=反复兜底后仍被拉活。
     """
     pid_of = getattr(deps.device, "pid_of", None)
     if pid_of is None:
         return True                               # 无验证原语：无可核验
-    try:
-        if pid_of() is None:
+    for round_no in range(1, 4):
+        try:
+            alive = pid_of()
+        except Exception as exc:
+            notes.append(f"关闭核验：pidof 读失败（{exc}）")
+            return False
+        if alive is None:
+            if round_no == 1:
+                # 第一轮就死还不够（alarm 拉活竞态窗口 ~2s）：稳一稳再确认一次
+                time.sleep(3.0)
+                continue
             return True
-    except Exception as exc:
-        notes.append(f"关闭核验：pidof 读失败（{exc}）")
-        return False
-    closed = _force_close_verified(deps, notes, reason="关闭核验兜底再关", tries=2)
-    return closed
+        closed = _force_close_verified(deps, notes,
+                                       reason=f"关闭核验第 {round_no} 轮兜底再关", tries=2)
+        if not closed:
+            return False
+        time.sleep(3.0)                           # 给 titan alarm 一个出手的机会
+    # 三轮全走到这里 = 第三轮杀完+3s 复核仍死
+    return True
 
 
 def _final_scroll(deps: RunDeps, notes: list) -> None:

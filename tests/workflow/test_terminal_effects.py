@@ -323,6 +323,26 @@ def test_pidof_alive_recovered_on_verify(tmp_path):
     assert "已关闭" in out.body
 
 
+def test_alarm_relaunch_race_killed_again(tmp_path):
+    """0.1.50 真机复盘：核验时 titan alarm 又把主进程拉活 → 兜底再杀压住。
+
+    pid 队列 [111, None, 333, None]（消费序：收尾 2 次 + 轮 1 + 兜底验证）：
+    - 收尾 _force_close_verified(tries=2)：发 1 stop 验 111（活）→ 等 →
+      发 2 stop 验 None（死）→ 收尾成功；
+    - 核验轮 1：pid=333 —— **alarm 把它拉活了** → 兜底发 1 stop 验 None（死）
+      → 不再发第 2 发；
+    - 等 3s → 轮 2：pid=None（队列耗尽保持 None）→ 确认已死。
+    """
+    d, dev, _ = deps_with_pid(tmp_path, [111, None, 333, None],
+                              facts=SUCCESS, obs=SUCCESS_OBS,
+                              effects=True, browse_sleep=lambda s: None)
+    out = run_once(d)
+    kinds = [k for k, _ in dev._rec.actions]
+    # 收尾 2 发 + 拉活后兜底 1 发 = 3 发 stop
+    assert kinds.count("stop") == 3
+    assert "已关闭" in out.body                # 最终压住了 → 报平安
+
+
 def test_no_pid_of_primitive_treated_as_closed(tmp_path):
     """FakeDevice 没有 pid_of：验证原语缺失按「已执行」处理，不喊失败。"""
     d, rec, _ = deps(tmp_path, facts=SUCCESS, obs=SUCCESS_OBS, effects=True,
