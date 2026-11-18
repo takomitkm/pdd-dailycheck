@@ -44,6 +44,24 @@ def _cmd_run(args) -> CliResult:
     ev = Path(os.environ.get("PDDCHECK_EVIDENCE", home / "pddcheck-runs"))
     date = __import__("datetime").date.today().isoformat()
 
+    # 环境预检（旧 pdd.sh 两道闸，2026-11-18 迁移补齐）：
+    #   69 = PATH 里没有 adb（L447-450，派发前静默退出）；
+    #   78 = 没有 tesseract（L1540-1543，**先推一条**再退 78，B02 的通知差异）。
+    import shutil
+    if os.environ.get("PDDCHECK_SKIP_PREFLIGHT") != "1":
+        if shutil.which("adb") is None:
+            return CliResult(ExitCode.NO_ADB, stderr="PATH 里找不到 adb（rc69）\n")
+        if shutil.which("tesseract") is None:
+            endpoint = (None if os.environ.get("PDDCHECK_NO_PUSH") == "1"
+                        else read_endpoint_file(home / "Desktop" / "pdd-push.url"))
+            try:
+                NotificationSender().send(endpoint, "PDD ❌ 缺 tesseract",
+                                          "PATH 里找不到 tesseract，这一轮没跑")
+            except Exception:                   # noqa: BLE001 — 推送失败不改退出码
+                pass
+            return CliResult(ExitCode.PRECHECK_FAILED,
+                             stderr="PATH 里找不到 tesseract（rc78）\n")
+
     specs = {
         # 入口「百亿补贴」是艺术字图标（11-13 真机：psm6 乱码、psm11 偶发）→
         # **关掉这里的坐标兜底**（allow_coord=False），让 stages 的优先级生效：
@@ -53,19 +71,31 @@ def _cmd_run(args) -> CliResult:
         # （11-10 实测 715/1280≈0.56、11-16 实测 622/1280≈0.49）。状态栏/顶部横幅
         # 一带（y<0.30）绝不可能是入口——2026-11-17 排查的假命中 (200,20) 会被
         # 这道闸拦在候选层，不再依赖上游不再犯假框错误。
-        "subsidy": TargetLocateSpec(key="subsidy", labels=("百亿补贴", "搜索补贴"), min_overlap=3,
+        # 11-18 修：别名漏了老脚本的「官方补贴」（pdd.sh ALIAS_subsidy 同款四字）。
+        # 首页入口是「百亿补贴」艺术字 + 下方小字「官方补贴」；psm11 实测把那一行读成
+        # 「入官方补贴」（conf 81，词框 (93,637)），只认「百亿补贴/搜索补贴」时永远不命中，
+        # 入口只能落到锚点，而锚点 x 取的是最左列 → 三连点空 → rc4。
+        "subsidy": TargetLocateSpec(key="subsidy", labels=("百亿补贴", "官方补贴"), min_overlap=4,
                                     coord=(0.10417, 0.55859), allow_coord=False,
-                                    region=(0.0, 0.30, 0.35, 0.75)),
-        "bag": TargetLocateSpec(key="bag", labels=("抽福袋",), min_overlap=3,
-                                coord=(0.13889, 0.69922)),
-        "light": TargetLocateSpec(key="light", labels=("立即点亮",), min_overlap=4),
+                                    region=(0.0, 0.30, 0.40, 0.80)),
+        # 词表/闸门按旧脚本补齐（ALIAS_bag 还有「去抢购」；REGION_bag 见 pdd.sh L140）
+        "bag": TargetLocateSpec(key="bag", labels=("抽福袋", "去抢购"), min_overlap=3,
+                                coord=(0.13889, 0.69922),
+                                region=(0.0, 0.35, 1.0, 0.85)),
+        # 旧脚本 light 有 COORD_light 兜底（L192）+ REGION_light（L143）；
+        # 认不到字时退标定坐标，与老流程同口径。
+        "light": TargetLocateSpec(key="light", labels=("立即点亮",), min_overlap=4,
+                                  coord=(0.83056, 0.22266),
+                                  region=(0.0, 0.08, 1.0, 0.42)),
         # 弹窗关闭词（旧脚本 POPUP 同款；profile [targets.popup] 同口径）
         "popup": TargetLocateSpec(key="popup", labels=("关闭", "跳过广告", "暂不", "以后再说"),
-                                  min_overlap=2),
+                                  min_overlap=2,
+                                  region=(0.45, 0.0, 1.0, 0.45)),
         # 奖励浮层主按钮「开心收下」（G3 迁移；profile [targets.take] 同口径）。
         # 整页读不到它，靠 coord 兜底 / 裁片档；只有奖励浮层证明分支会用这颗点。
         "take": TargetLocateSpec(key="take", labels=("开心收下",), min_overlap=3,
-                                 coord=(0.49861, 0.58750)),
+                                 coord=(0.49861, 0.58750),
+                                 region=(0.0, 0.50, 1.0, 0.70)),
     }
     # --stages：先走 就绪→入口→福袋 流程段（真机验证见 t18a-calibration-findings.md）。
     run_stages = bool(getattr(args, "stages", False))
@@ -129,6 +159,21 @@ def _cmd_run(args) -> CliResult:
             notifier=NotificationSender(), journal=Journal(state / "journal" / "actions.jsonl"),
             cfg=cfg, now_ns=lambda: __import__("time").monotonic_ns(),
             lease_factory=None, evidence=evidence)
+        # summary.txt（旧 pdd.sh L1638-1641 同款）：查因先看这一份，再进 run.log。
+        if evidence is not None:
+            evidence.summary({
+                "result": int(outcome.exit_code),
+                "lit": outcome.lit,
+                "rc": outcome.rc,
+                "marker": outcome.marker_written,
+                "ledger": outcome.ledger_written,
+                "delivered": outcome.delivered,
+                "date": date,
+                "evidence": evidence.declare() or "",
+                "screen": getattr(outcome, "last_activity", "") or "",
+                "why": stats.get("stage_failure", "") or "",
+                "stages": stats.get("stages", []),
+            })
         line = (f"run {date}: exit={int(outcome.exit_code)} lit={outcome.lit} rc={outcome.rc} "
                 f"marker={outcome.marker_written} ledger={outcome.ledger_written} "
                 f"delivered={outcome.delivered} observes={stats['observe_calls']}\n")

@@ -86,6 +86,21 @@ class EvidenceWriter:
         except OSError as exc:
             self.errors.append(f"shot {name}: {exc}")
 
+    def summary(self, fields: dict[str, object]) -> None:
+        """写 summary.txt（旧 pdd.sh L1638-1641 同款：key=value 一行一项）。
+
+        旧口径七项：result / lit / steps / date / evidence / screen / why。
+        查因的人先看它，再进 run.log。写不进只记 errors，不挡业务。
+        """
+        d = self._ensure_dir()
+        if d is None:
+            return
+        try:
+            text = "".join(f"{k}={v}\n" for k, v in fields.items())
+            atomic_write_text(d / "summary.txt", text)
+        except OSError as exc:
+            self.errors.append(f"summary: {exc}")
+
 
 class DailyStore:
     def __init__(self, evidence_root: Path, ledger_path: Path) -> None:

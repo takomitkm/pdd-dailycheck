@@ -140,8 +140,8 @@ class StageRunner:
             self.policy._sleep(self.policy.focus_retry_wait_s)
             v = self._read()
         if v.focus_package == self.policy.pkg and \
-                (v.focus_activity or "").endswith("HomeActivity"):
-            return                                     # 已在首页
+                (v.focus_activity or "").endswith(("HomeActivity", "MainFrameActivity")):
+            return                                     # 已在首页（旧 is_home_page 两个组件名都认）
         # 11-10 真机教训：PDD 任务栈会恢复到**陈旧店铺/促销页**（NewPageActivity），
         # 「任何 PDD 页可续跑」会让入口/福袋在错页上跑（entry 假 ok → bag rc5）。
         # 冷启动组件名修好后（T59），改为旧脚本 RESTART_APP 口径：**不在首页就
@@ -196,7 +196,7 @@ class StageRunner:
         attempts = self.policy.entry_retry + 1
         for attempt in range(attempts):
             v = self._read()
-            if v.focus_package == self.policy.pkg and _in_subsidy_channel(v.ocr_text):
+            if _entered_channel(v, self.policy):
                 return                                     # 已在补贴频道
             # **文字定位时禁用坐标兜底**（11-13）：否则 locate_all 会直接给一个
             # CONFIG_COORD 候选当 winner，锚点/坐标分支就永远轮不到。
@@ -213,7 +213,7 @@ class StageRunner:
                 self._act("tap", text_point)
                 self.policy.wait_step()                   # 等页面跳转（真机实测必需）
                 v2 = self._read()
-                if _in_subsidy_channel(v2.ocr_text):
+                if _entered_channel(v2, self.policy):
                     return
                 # 点错了 → 退掉，让下一轮在干净页面重来（pdd.sh 同款：点错就 BACK）
                 self._act("back", None)
@@ -239,7 +239,7 @@ class StageRunner:
                 self._act("tap", pt)
                 self.policy.wait_step()                   # 等跳转（真机实测：不等等于没点）
                 v2 = self._read()
-                if _in_subsidy_channel(v2.ocr_text):
+                if _entered_channel(v2, self.policy):
                     return
                 self._act("back", None)                   # 点错了 → 退掉再试
                 self.policy._sleep(1.0)
@@ -311,15 +311,37 @@ class StageRunner:
         raise StageFailure(5, "福袋页进不去/证明失败")
 
 
-def _in_subsidy_channel(text: str) -> bool:
-    """落地页是不是「百亿补贴」频道（11-10 真机教训）。
+# 频道特征字（任一命中即算进对页）。11-18 真机实测：频道页顶部横幅读得出
+# 「百亿加倍补」「百亿消费券」，页签读得出「精选」；而「奢品馆」被 psm6 读成
+# 「Ages IK ga」、「抽福袋」整页一档也读不出——旧判据要求「精选 AND 奢品馆」，
+# 会把**正确落地**判成错页（入口点对了也 BACK 出去，三连 rc4）。
+_CHANNEL_MARKERS = ("抽福袋", "搜低价", "精选", "奢品馆", "百亿加倍补",
+                    "百亿消费券", "天天折扣", "极速达")
 
-    不能只看 `activity != home_activity`：多多买菜/店铺/促销页也都是
-    NewPageActivity，会把「点错入口」误判成「进对了」（entry 假 ok → bag rc5）。
-    认频道特征字：抽福袋 / 搜低价 / 精选+奢品馆（首页是「推荐」不是「精选」，
-    且无抽福袋/搜低价，不会误判）。
+
+def _in_subsidy_channel(text: str) -> bool:
+    """落地页是不是「百亿补贴」频道（11-10 加固，11-18 放宽为任一特征字）。"""
+    return any(m in text for m in _CHANNEL_MARKERS)
+
+
+def _entered_channel(v: "PageView", policy: "StagePolicy") -> bool:
+    """点完入口之后：这一发到底有没有进对页。
+
+    判据两层（老脚本是第二层，11-10 起加了第一层）：
+    1. 页面上认到任一频道特征字 → 进对了；
+    2. 否则退回**老脚本口径**：焦点还在 PDD 且已不在首页（MainFrame/Home 之外）
+       就算进——`_in_subsidy_channel` 是加固，不是唯一判据。11-18 实测：
+       正确落地那页的「奢品馆/抽福袋」都读不出来，只靠第 1 层会自己把正确页
+       判成错页、连退三次报 rc4。第 2 层有 11-10 说过的误报面（买菜/店铺也是
+       NewPageActivity），但那是老流程一直在用的口径，误报止于下一段 bag 失败，
+       不会误点/误报成功。
     """
-    return ("抽福袋" in text) or ("搜低价" in text) or ("精选" in text and "奢品馆" in text)
+    if _in_subsidy_channel(v.ocr_text):
+        return True
+    act = v.focus_activity or ""
+    if v.focus_package != policy.pkg or not act:
+        return False
+    return not act.endswith(("HomeActivity", "MainFrameActivity"))
 
 
 class _Page:

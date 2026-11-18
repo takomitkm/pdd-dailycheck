@@ -643,3 +643,49 @@
 - **部署**：current=0.1.49（previous=0.1.48）。0.1.48 的锚点偏移缺陷已修，回滚价值低。
 - 教训：**「可读性/位置」都是时变量**——版式、横幅、OCR 逐帧抖动；锚点偏移类标定必须
   留多档 + 逐发裁决 + 证据落盘，单值标定在动态首页上撑不过三天。
+
+### 57. 2026-11-18 — 双 timer 抢机 + 入口词表漂移/落地校验过期（0.1.52–0.1.54）
+
+- **现象**：11-18 10:00 新旧两套同时触发（`pddcheck` 10:00:18、旧 `pdd.service` 10:00:20），
+  两个进程对同一部手机（192.168.1.110:16132）交叠点击 10:00:22–10:09:36。结果双失败：
+  pddcheck `rc4`（入口三连没进）、旧 `pdd.sh` `rc5`（福袋核实只认出固定坐标），两条推送。
+- **根因 1（调度）**：11-07 的接管只做了 `systemctl --user disable pdd.timer`，但
+  `home-lab.service` 里 `Wants=pdd.timer`——每次伞服务/会话启动都会把已 disable 的老 timer
+  重新拉起（journal 实证：11-16 21:36、11-17 19:08 各一次）。11-17 没撞是因为当天
+  `.done` 标记已存在、旧脚本早退；11-18 无标记 → 真跑 → 撞车。
+  修复：`home-lab.service` 删 `Wants=pdd.timer`（备份 `home-lab.service.bak-20261118-171234`）
+  + stop/disable `pdd.timer`；旧 `pdd.sh`/`pdd-ocr.conf`/旧 unit 全部移入
+  `~/Desktop/pdd-legacy-trash-20261118/`（40 项，不硬删）。保留新程序仍在读的
+  `pdd-pause`（账本）、`pdd-push.url`（端点）、`pdd-runs`（证据根 + 日标记）。
+- **根因 2（入口词表漂移）**：`cli/app.py` 的生产 specs 是硬编码，`subsidy` 别名被改成
+  `("百亿补贴","搜索补贴")`——**漏了旧脚本的「官方补贴」**。真机 psm11 把首页那条横幅读成
+  `入官方补贴`（conf 81，`补贴` 词框 (93,637)），两个字都不命中 → 文字路永远为空 →
+  只剩锚点（x 取最左列 = 36）→ 三连点空 → rc4。修复：别名补回 `官方补贴`、overlap 4、
+  region 对齐 profile（0,0.30,0.40,0.80）。修复后同一帧定位直接给出 (83,645)，与旧脚本一致。
+- **根因 3（落地校验过期）**：`_in_subsidy_channel` 要求「抽福袋 / 搜低价 / 精选+奢品馆」。
+  11-18 实测进对页后 psm6 把「奢品馆」读成 `Ages IK ga`、「抽福袋」整页一档读不出，
+  只认到「精选」→ 正确落地被判成错页、BACK 出去。修复：改为任一特征字
+  （抽福袋/搜低价/精选/奢品馆/百亿加倍补/百亿消费券/天天折扣/极速达）+ 旧脚本兜底
+  「焦点是 PDD 且已离开 MainFrame/Home」。
+- **顺带修的四条（老有新没有）**：
+  1. `--stages` 的入口/福袋段原来跑在日标记判定**之前**——「今天已签到」照样把手机拖进入口
+     （19:16 smoke test 实测连点）。改为 stages 前先判标记，命中则零业务动作，仅按 11-18
+     铁律关 app 并返回 `skipped=daily_marker`。
+  2. 动作级日志：每发 tap/back 打 `[ACT] tap (x,y) -> acknowledged`（旧脚本 `[STEP] … 点 83 645`）；
+     当天 rc4 复盘就卡在「点没点、点了哪儿」全无记录。
+  3. `facts.py` 词表补齐 `ALIAS_done/exchange/prize/pend` 四组（原来只认「今日已点亮 /
+     立即兑换 / 恭喜提前锁定」，「已使用 / 明日再来 / 明天再来」一个都不认，「PDD 已使用」
+     标题分支不可达）。
+  4. 环境预检 rc69（PATH 无 adb）/ rc78（无 tesseract，先推一条再退）+ `summary.txt`
+     （result/lit/rc/marker/ledger/delivered/date/evidence/screen/why/stages）。
+  另外：`bag/light/popup/take` 补 region 闸、light 补 `COORD_light` 兜底、
+  `is_home_page` 同时认 `MainFrameActivity`（旧 L1448）。
+- **真机验证**：0.1.52 补签 `18:45:28 ready → 18:46:10 entry:ok → 18:46:27 bag:ok →
+  18:48:17 exit=0 lit=3 marker=True delivered=sent`（`PDD ✅`，app 已关、pidof 空）；
+  0.1.54 标记在时 smoke test 1 秒级退出：`early_exit_close … closed=True`、run.log 零 `[ACT]`。
+- **部署**：current=0.1.54（previous=0.1.53）；timer 下次 11-19 10:00，仅此一套。
+- **仍待迁移（审计清单，未做）**：band 通道/`psm_band_by_key` 生产未启用、`PILL_SCALES`
+  只跑 ×2、browse 段无横幅判定与复读、`FIND_RETRY_bag=12` 未实现、锁屏 rc3 探测、
+  设备重连预算、`run` 仍不读 `profile.toml`（硬编码 specs 与 profile 有漂移风险）、
+  `replay` 缺 manifest/events 落盘。详见 11-18 的 parity 审计表。
+

@@ -226,7 +226,13 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
 
     # 流程段（可选）：就绪 → 入口 → 福袋；失败以 StageFailure 带 rc 收手，
     # 由 run_once 映射成 4/5/7（不写标记、只 HOME 收尾）。
-    if cfg.run_stages:
+    # 日标记先判（旧 pdd.sh L1535-1538，2026-11-18 迁移补齐）：
+    # 当天已完成时 **stages 一个动作都不做**。原来 stages 跑在 run_once 的标记判定
+    # 之前，于是「今天已签到」照样把手机拖进入口/福袋（19:16 的 smoke test 实测：
+    # 标记在，仍然连点入口）。这里只跳过 stages，run_once 的标记分支仍会按
+    # 11-18 铁律把 PDD 关掉并返回 skipped=daily_marker。
+    marker_today = store.marker_exists(cfg.business_date)
+    if cfg.run_stages and (cfg.force or not marker_today):
         from pddcheck.workflow.stages import (
             StageFailure, StagePolicy, StageRunner,
         )
@@ -260,7 +266,14 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
                 target_key=("stage" if business else None),
                 expected_package=("com.xunmeng.pinduoduo" if business else None),
                 required_window_kind=(WindowKind.APP if business else None))
-            return device.execute(intent, point)
+            receipt = device.execute(intent, point)
+            # 动作级日志（2026-11-18 迁移补齐）：旧 pdd.sh 每一枪都打
+            # 「[STEP] subsidy 用 ocr 点 83 645」，新版原来只打入口锚点，
+            # 点没点、点了哪儿全查不到（当天 rc4 复盘就卡在这儿）。
+            _ev_log(evidence, f"[ACT] {kind}"
+                    + (f" ({point[0]},{point[1]})" if point else "")
+                    + f" -> {receipt.status.value}")
+            return receipt
 
         def read_page():
             from pddcheck.workflow.stages import PageView
