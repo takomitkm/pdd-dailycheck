@@ -683,7 +683,10 @@
 - **真机验证**：0.1.52 补签 `18:45:28 ready → 18:46:10 entry:ok → 18:46:27 bag:ok →
   18:48:17 exit=0 lit=3 marker=True delivered=sent`（`PDD ✅`，app 已关、pidof 空）；
   0.1.54 标记在时 smoke test 1 秒级退出：`early_exit_close … closed=True`、run.log 零 `[ACT]`。
-- **部署**：current=0.1.54（previous=0.1.53）；timer 下次 11-19 10:00，仅此一套。
+- **部署**：current=0.1.55（0.1.52 补签 / 0.1.53 词表闸门 / 0.1.54 标记前移 /
+  0.1.55 specs 抽取）；timer 下次 11-19 10:00，仅此一套。新增
+  `tests/cli/test_specs_match_profile.py` 钉住 specs 的别名/overlap/region 与
+  profile 同值——防 11-18 这种硬编码漂移再犯。
 - **仍待迁移（审计清单，未做）**：band 通道/`psm_band_by_key` 生产未启用、`PILL_SCALES`
   只跑 ×2、browse 段无横幅判定与复读、`FIND_RETRY_bag=12` 未实现、锁屏 rc3 探测、
   设备重连预算、`run` 仍不读 `profile.toml`（硬编码 specs 与 profile 有漂移风险）、

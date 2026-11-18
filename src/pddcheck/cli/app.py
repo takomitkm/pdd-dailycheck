@@ -23,6 +23,53 @@ class CliResult:
     stderr: str = ""
 
 
+def _default_specs() -> dict:
+    """生产定位 spec（别名/overlap/region/坐标）。
+
+    **别名 / overlap / region 必须与 profiles/pdd/v1/profile.toml 一致**：
+    `tests/cli/test_specs_match_profile.py` 钉着这三项（今天 11-18 的事故就是
+    别名漂移成「百亿补贴/搜索补贴」、漏了「官方补贴」→ 入口 rc4）。
+    坐标是**真机标定值**，允许与 profile 不同（profile 是公共基线，生产可覆盖）。
+    """
+    from pddcheck.perception import TargetLocateSpec
+
+    return {
+        # 入口「百亿补贴」是艺术字图标（11-13 真机：psm6 乱码、psm11 偶发）→
+        # **关掉这里的坐标兜底**（allow_coord=False），让 stages 的优先级生效：
+        # 文字命中 → 锚点推算（可读图标行 + 偏移）→ 标定坐标（最后兜底）。
+        # 11-10 实测坐标 (75,715)；11-11 那天版式漂移导致落空 → 锚点更抗漂移。
+        # region 闸（y≥0.30）：首页入口图标恒在屏幕中下部；历史真机 y∈[0.40,0.60]
+        # （11-10 实测 715/1280≈0.56、11-16 实测 622/1280≈0.49）。状态栏/顶部横幅
+        # 一带（y<0.30）绝不可能是入口——2026-11-17 排查的假命中 (200,20) 会被
+        # 这道闸拦在候选层，不再依赖上游不再犯假框错误。
+        # 11-18 修：别名漏了老脚本的「官方补贴」（pdd.sh ALIAS_subsidy 同款四字）。
+        # 首页入口是「百亿补贴」艺术字 + 下方小字「官方补贴」；psm11 实测把那一行读成
+        # 「入官方补贴」（conf 81，词框 (93,637)），只认「百亿补贴/搜索补贴」时永远不命中，
+        # 入口只能落到锚点，而锚点 x 取的是最左列 → 三连点空 → rc4。
+        "subsidy": TargetLocateSpec(key="subsidy", labels=("百亿补贴", "官方补贴"), min_overlap=4,
+                                    coord=(0.10417, 0.55859), allow_coord=False,
+                                    region=(0.0, 0.30, 0.40, 0.80)),
+        # 词表/闸门按旧脚本补齐（ALIAS_bag 还有「去抢购」；REGION_bag 见 pdd.sh L140）
+        "bag": TargetLocateSpec(key="bag", labels=("抽福袋", "去抢购"), min_overlap=3,
+                                coord=(0.13889, 0.69922),
+                                region=(0.0, 0.35, 1.0, 0.85)),
+        # 旧脚本 light 有 COORD_light 兜底（L192）+ REGION_light（L143）；
+        # 认不到字时退标定坐标，与老流程同口径。
+        "light": TargetLocateSpec(key="light", labels=("立即点亮",), min_overlap=3,
+                                  coord=(0.83056, 0.22266),
+                                  region=(0.0, 0.08, 1.0, 0.42)),
+        # 弹窗关闭词（旧脚本 POPUP 同款；profile [targets.popup] 同口径）
+        "popup": TargetLocateSpec(key="popup", labels=("关闭", "跳过广告", "暂不", "以后再说"),
+                                  min_overlap=2,
+                                  region=(0.45, 0.0, 1.0, 0.45)),
+        # 奖励浮层主按钮「开心收下」（G3 迁移；profile [targets.take] 同口径）。
+        # 整页读不到它，靠 coord 兜底 / 裁片档；只有奖励浮层证明分支会用这颗点。
+        "take": TargetLocateSpec(key="take", labels=("开心收下",), min_overlap=3,
+                                 coord=(0.49861, 0.58750),
+                                 region=(0.0, 0.50, 1.0, 0.70)),
+    }
+
+
 def _cmd_run(args) -> CliResult:
     """run：真实适配器装配（AdbDevice + TesseractEngine）→ bootstrap 端到端。"""
     from pathlib import Path
@@ -62,41 +109,7 @@ def _cmd_run(args) -> CliResult:
             return CliResult(ExitCode.PRECHECK_FAILED,
                              stderr="PATH 里找不到 tesseract（rc78）\n")
 
-    specs = {
-        # 入口「百亿补贴」是艺术字图标（11-13 真机：psm6 乱码、psm11 偶发）→
-        # **关掉这里的坐标兜底**（allow_coord=False），让 stages 的优先级生效：
-        # 文字命中 → 锚点推算（可读图标行 + 偏移）→ 标定坐标（最后兜底）。
-        # 11-10 实测坐标 (75,715)；11-11 那天版式漂移导致落空 → 锚点更抗漂移。
-        # region 闸（y≥0.30）：首页入口图标恒在屏幕中下部；历史真机 y∈[0.40,0.60]
-        # （11-10 实测 715/1280≈0.56、11-16 实测 622/1280≈0.49）。状态栏/顶部横幅
-        # 一带（y<0.30）绝不可能是入口——2026-11-17 排查的假命中 (200,20) 会被
-        # 这道闸拦在候选层，不再依赖上游不再犯假框错误。
-        # 11-18 修：别名漏了老脚本的「官方补贴」（pdd.sh ALIAS_subsidy 同款四字）。
-        # 首页入口是「百亿补贴」艺术字 + 下方小字「官方补贴」；psm11 实测把那一行读成
-        # 「入官方补贴」（conf 81，词框 (93,637)），只认「百亿补贴/搜索补贴」时永远不命中，
-        # 入口只能落到锚点，而锚点 x 取的是最左列 → 三连点空 → rc4。
-        "subsidy": TargetLocateSpec(key="subsidy", labels=("百亿补贴", "官方补贴"), min_overlap=4,
-                                    coord=(0.10417, 0.55859), allow_coord=False,
-                                    region=(0.0, 0.30, 0.40, 0.80)),
-        # 词表/闸门按旧脚本补齐（ALIAS_bag 还有「去抢购」；REGION_bag 见 pdd.sh L140）
-        "bag": TargetLocateSpec(key="bag", labels=("抽福袋", "去抢购"), min_overlap=3,
-                                coord=(0.13889, 0.69922),
-                                region=(0.0, 0.35, 1.0, 0.85)),
-        # 旧脚本 light 有 COORD_light 兜底（L192）+ REGION_light（L143）；
-        # 认不到字时退标定坐标，与老流程同口径。
-        "light": TargetLocateSpec(key="light", labels=("立即点亮",), min_overlap=4,
-                                  coord=(0.83056, 0.22266),
-                                  region=(0.0, 0.08, 1.0, 0.42)),
-        # 弹窗关闭词（旧脚本 POPUP 同款；profile [targets.popup] 同口径）
-        "popup": TargetLocateSpec(key="popup", labels=("关闭", "跳过广告", "暂不", "以后再说"),
-                                  min_overlap=2,
-                                  region=(0.45, 0.0, 1.0, 0.45)),
-        # 奖励浮层主按钮「开心收下」（G3 迁移；profile [targets.take] 同口径）。
-        # 整页读不到它，靠 coord 兜底 / 裁片档；只有奖励浮层证明分支会用这颗点。
-        "take": TargetLocateSpec(key="take", labels=("开心收下",), min_overlap=3,
-                                 coord=(0.49861, 0.58750),
-                                 region=(0.0, 0.50, 1.0, 0.70)),
-    }
+    specs = _default_specs()
     # --stages：先走 就绪→入口→福袋 流程段（真机验证见 t18a-calibration-findings.md）。
     run_stages = bool(getattr(args, "stages", False))
     # light/done 右上按钮裁片（真机验证：pill inv×2 psm7 读「立即点亮/今日已点亮」conf 96）
