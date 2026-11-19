@@ -692,3 +692,36 @@
   设备重连预算、`run` 仍不读 `profile.toml`（硬编码 specs 与 profile 有漂移风险）、
   `replay` 缺 manifest/events 落盘。详见 11-18 的 parity 审计表。
 
+### 58. 2026-11-19 — 自然基线确认 + 四项离线迁移落地（0.1.56）
+
+- **11-19 10:00 自然跑通过（0.1.55，唯一 timer、无并发）**：`exit=0 lit=3 rc=0
+  marker=True delivered=sent`（`PDD ✅`）。run.log 里动作日志把入口写法钉死了：
+  `[ACT] tap (74,625)`（文字路命中）→ `entry:ok` → `[ACT] tap (100,895)`（bag 坐标兜底）
+  → `bag:ok` → `verify: legacy_text_without_counter` → `close_verify: closed=True`。
+  这就是 11-18 修复在自然条件下的对照基线。
+- **FIND_RETRY_bag=12（旧 L67-69/L803-805）**：`StageRunner.open_bag` 改成
+  「seek + prove 共用读页预算」——认不到点就等 `seek_interval_s` 再读下一帧
+  （轮播换帧；**不按 BACK**，BACK 会把刚进的活动页退回频道页），认到点再点、最多
+  `prove_max` 次。`StagePolicy.seek_retry/seek_interval_s` 默认 1/0（47 案基线不变），
+  生产由 `PipelineConfig.bag_find_retry=12 / bag_find_interval_s=3.0` 灌入
+  （profile `targets.bag.find_retry/find_interval` 同值）。
+- **browse 前置判定（旧 L1229 `text_present browse`）**：点亮后先读一帧，认到
+  「浏览当前页面 / 即可点亮 / 滑动浏览」才滑；不是浏览页就**不滑**（白滑 15s 还会把页面滚走）。
+  这一帧的观察直接当 `AFTER_DIRECT` 喂给 verify（`pre_obs`），不额外多一次整页 OCR。
+- **band 通道：按老口径量过，决定不接**。量法完全照 `band_pass`：`REGION_bag`
+  裁片 + 2%/1.5% padding + `autocontrast(cutoff=1)` + 3× LANCZOS + psm7 再 psm11。
+  样本：11-19 的 `obs-02/03`（频道页）、`obs-04`（活动页）、11-18 入口帧，
+  关键词 `抽福袋/去抢购/已点亮/立即点亮`——**全部零命中**（整页 psm7 也是零命中；
+  psm11 在频道页能读「奢品馆」，psm6 能读「已点亮」）。结论：band 进生产只是每帧多两次
+  OCR、零收益，不接；等真出现「整页+裁片都读不出」的 miss 再回头量。
+- **replay 落盘（D05 的未完成半边）**：`EvidenceWriter` 新增 `manifest/event/tsv`——
+  每次运行写 `manifest.json`（run_id/date/profile）、`events.jsonl`
+  （`check_before` / `verify_observation` / `outcome`）、每通道 `obs-NN-<channel>.tsv`。
+  `pddcheck replay` 的 `load_run` 现在三项齐全（manifest/events/ocr_tsv），
+  闭环测试 `tests/storage/test_evidence_replay.py`：写证据 → `load_run` → `exact_replay`
+  得到 lit=3/OK；坏根目录只记 errors 不抛（I11）。
+- 测试：全量 passed（新增 replay 闭环 2 条；open_bag/browse 改动对既有 47 案基线零影响）。
+- **仍未迁**：`PILL_SCALES` 只跑 ×2 一档；锁屏 rc3 探测、设备掉线重连 rc2；
+  `run` 仍不读 `profile.toml`（靠 specs/profile 一致性测试挡漂移）；`AFTER_REENTER_BAG`
+  救场路未接线。
+

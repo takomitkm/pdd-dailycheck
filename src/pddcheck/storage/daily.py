@@ -29,12 +29,15 @@ class EvidenceWriter:
     """
 
     def __init__(self, evidence_root: Path, business_date: str,
-                 run_stamp: str | None = None) -> None:
+                 run_stamp: str | None = None, run_id: str | None = None) -> None:
         self._root = Path(evidence_root)
         self._date = business_date
         self._stamp = run_stamp
+        self._run_id = run_id or f"run-{business_date}"
         self._dir: Path | None = None
         self._declared = False          # run_dir 已要过（哪怕创建失败也不再重试）
+        self._evlog = None
+        self._manifest_written = False
         self.errors: list[str] = []
 
     def _ensure_dir(self) -> Path | None:
@@ -100,6 +103,64 @@ class EvidenceWriter:
             atomic_write_text(d / "summary.txt", text)
         except OSError as exc:
             self.errors.append(f"summary: {exc}")
+
+    # ---- 结构化证据：manifest / events.jsonl / OCR tsv（pddcheck replay 的输入）----
+    def _events(self):
+        if self._evlog is not None:
+            return self._evlog
+        d = self._ensure_dir()
+        if d is None:
+            return None
+        try:
+            from pddcheck.evidence.events import EventLog
+            self._evlog = EventLog(d / "events.jsonl", self._run_id)
+        except Exception as exc:                 # noqa: BLE001 — 证据不挡业务
+            self.errors.append(f"events: {exc}")
+        return self._evlog
+
+    def event(self, phase: str, name: str, status: str = "ok", **details: object) -> None:
+        """追加一条事件（seq 单调、崩溃半截行容错由 EventLog 保证）。"""
+        log = self._events()
+        if log is None:
+            return
+        try:
+            import time
+            from datetime import datetime
+            from pddcheck.evidence.events import RunEvent
+            now = datetime.now().astimezone()
+            log.append(RunEvent(seq=0, run_id=self._run_id, phase=phase,
+                                event_name=name, status=status,
+                                wall_time=now.isoformat(timespec="seconds"),
+                                monotonic_ns=time.monotonic_ns(),
+                                details=dict(details)))
+        except Exception as exc:                 # noqa: BLE001
+            self.errors.append(f"event {name}: {exc}")
+
+    def manifest(self, payload: dict) -> None:
+        """写 run manifest（只写一次；run_id 由 writer 补）。"""
+        if self._manifest_written:
+            return
+        d = self._ensure_dir()
+        if d is None:
+            return
+        try:
+            from pddcheck.evidence.events import write_head
+            write_head(d, {**payload, "run_id": self._run_id})
+            self._manifest_written = True
+        except Exception as exc:                 # noqa: BLE001
+            self.errors.append(f"manifest: {exc}")
+
+    def tsv(self, name: str, text: str) -> None:
+        """落一份 OCR 原始 TSV（replay 的 ocr_tsv 工件）。"""
+        if not text:
+            return
+        d = self._ensure_dir()
+        if d is None:
+            return
+        try:
+            (d / f"{name}.tsv").write_text(text, encoding="utf-8")
+        except OSError as exc:
+            self.errors.append(f"tsv {name}: {exc}")
 
 
 class DailyStore:

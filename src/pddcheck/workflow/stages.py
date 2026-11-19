@@ -41,6 +41,7 @@ class PageView:
 class StagePolicy:
     def __init__(self, *, pkg: str, home_activity: str, entry_retry: int = 2,
                  prove_max: int = 3, min_conf: int = 40,
+                 seek_retry: int = 1, seek_interval_s: float = 0.0,
                  allow_coord_fallback: bool = True,
                  step_wait_s: float = 4.0, sleep=None,
                  restart_app: bool = True, focus_retry: int = 3,
@@ -49,6 +50,11 @@ class StagePolicy:
         self.home_activity = home_activity
         self.entry_retry = entry_retry
         self.prove_max = prove_max
+        # 轮播位寻找预算（旧 FIND_RETRY_bag=12 × FIND_INTERVAL_bag=3）：
+        # 「抽福袋」在频道页轮播里一帧有、一帧是消费券，认不到就等下一帧再认。
+        # 默认 1/0 = 不额外重试（47 案基线与单测保持原节拍）。
+        self.seek_retry = seek_retry
+        self.seek_interval_s = seek_interval_s
         self.min_conf = min_conf
         # 坐标兜底（旧脚本同款）：入口是图片、字认不到时用标定坐标。
         # 兜底只允许在**主线**（不在恢复链路）用——旧脚本的 I04/I05 口径。
@@ -277,7 +283,14 @@ class StageRunner:
         注意（真机踩过）：一旦提供 extra_candidates，就**禁用整页坐标兜底**——
         bag 的 COORD 是活动页那颗的位置，在频道页盲点它会点到别处。
         """
-        for attempt in range(self.policy.prove_max):
+        # 轮播位寻找 + 证明（旧 pdd.sh：FIND_RETRY_bag=12 × FIND_INTERVAL_bag=3 找
+        # 「抽福袋」，PROVE_KEY=bag 拦误点）。两者共用一份读页预算：
+        #   认不到点 → 等 seek_interval_s 再读下一帧（轮播会换帧；**不按 BACK**，
+        #              BACK 会把刚进的活动页退回频道页，真机踩过 点→退→点 死循环）；
+        #   认到点但证明不了 → 再读再点，最多 prove_max 次。
+        max_reads = max(1, self.policy.seek_retry) + max(0, self.policy.prove_max - 1)
+        proofs = 0
+        for _ in range(max_reads):
             v = self._read()
             # 已在点亮活动页（生产 11-08 补签踩到：手机停在活动页、当天福袋已抽）
             # → open_bag 的目标已达成，直接通过（点亮段在当前页续跑）。
@@ -294,20 +307,20 @@ class StageRunner:
             if point is None:
                 # 整页兜底也走真帧；合成帧产不出坐标（见 enter_subsidy 注释）
                 point = self._locate(v, spec.key, {spec.key: spec})
-            if point is not None:
-                self._act("tap", point)
-                self.policy.wait_step()
-                v2 = self._read()
-                f = facts_from_text(v2.ocr_text)
-                # 判据是**页面文字**（旧脚本口径）：进度行 / 待兑换 / 已点亮 任一即证明。
-                # 不要求 activity 变化——活动页与频道页常常是同一个 NewPageActivity。
-                if f.progress_count is not None or f.pend_text or f.done_text:
-                    return                                 # 进对了福袋页
-                # 点完还证明不了：**不再盲目 BACK**（真机踩过：BACK 把已进的活动页退回
-                # 频道页，形成 点→退→点 的死循环）。只重新观察一轮。
+            if point is None:
+                self.policy._sleep(self.policy.seek_interval_s)
                 continue
-            if attempt < self.policy.prove_max - 1:
-                self._act("back", None)                    # 轮播另一帧，退一步换一帧
+            self._act("tap", point)
+            self.policy.wait_step()
+            v2 = self._read()
+            f = facts_from_text(v2.ocr_text)
+            # 判据是**页面文字**（旧脚本口径）：进度行 / 待兑换 / 已点亮 任一即证明。
+            # 不要求 activity 变化——活动页与频道页常常是同一个 NewPageActivity。
+            if f.progress_count is not None or f.pend_text or f.done_text:
+                return                                 # 进对了福袋页
+            proofs += 1
+            if proofs >= max(1, self.policy.prove_max):
+                break
         raise StageFailure(5, "福袋页进不去/证明失败")
 
 

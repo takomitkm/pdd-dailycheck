@@ -199,11 +199,22 @@ def run_once(deps: RunDeps) -> RunOutcome:
                     notes.append("dry-run：定位不到「立即点亮」，本来会滑 15s 再核实，本次不滑")
                     lit = 0
                 else:
-                    notes.append("定位不到「立即点亮」→ 按浏览任务处理（滑 15s 后核实）")
-                    _evlog(deps, "light target not found -> browse-then-verify")
-                    swipe_ok = _browse_after_light(deps, notes)
-                    obs = _verify_after_light(deps, notes, browsed=True,
-                                              verify_ladder=getattr(deps, "verify_ladder", False))
+                    # 先读一帧判「是不是真的浏览任务页」（旧 text_present browse）；
+                    # 是才滑——不是就白滑 15s，还会把页面滚走。
+                    pre_obs = deps.screen.post_tap_observations()
+                    raw = getattr(deps.screen, "_last_raw_text", "")
+                    swipe_ok = False
+                    if _browse_present(raw):
+                        notes.append("定位不到「立即点亮」→ 浏览任务页，滑 15s 后核实")
+                        _evlog(deps, "light target not found -> browse page, swipe")
+                        swipe_ok = _browse_after_light(deps, notes)
+                        pre_obs = None            # 滑完必须重新观察
+                    else:
+                        notes.append("定位不到「立即点亮」且没认到浏览任务页 → 不滑，直接核实")
+                        _evlog(deps, "light not found, not browse page -> verify only")
+                    obs = _verify_after_light(deps, notes, browsed=swipe_ok,
+                                              verify_ladder=getattr(deps, "verify_ladder", False),
+                                              pre_obs=pre_obs)
                     decision = verify_light_decision(pre.before_count, facts.get("tap_method", "ocr"), obs)
                     rc, lit = decision.rc, decision.lit
                     notes.append(f"核实：{decision.proof_kind.value} — {decision.why}"
@@ -227,10 +238,20 @@ def run_once(deps: RunDeps) -> RunOutcome:
                     # 后跳到浏览页「滑动浏览当前页面10秒即可点亮」——必须滚动才算点亮。
                     # 旧脚本 I06 同款：最终 20 次下滑）。做完再核实。
                     swipe_ok = False
+                    pre_obs = None
                     if getattr(deps, "browse_after_light", False):
-                        swipe_ok = _browse_after_light(deps, notes)
+                        pre_obs = deps.screen.post_tap_observations()
+                        raw = getattr(deps.screen, "_last_raw_text", "")
+                        if _browse_present(raw):
+                            _evlog(deps, "browse page present -> swipe")
+                            swipe_ok = _browse_after_light(deps, notes)
+                            pre_obs = None
+                        else:
+                            notes.append("点亮后没认到浏览任务页 → 不滑")
+                            _evlog(deps, "not a browse page -> skip swipe")
                     obs = _verify_after_light(deps, notes, browsed=swipe_ok,
-                                              verify_ladder=getattr(deps, "verify_ladder", False))
+                                              verify_ladder=getattr(deps, "verify_ladder", False),
+                                              pre_obs=pre_obs)
                     decision = verify_light_decision(pre.before_count, facts.get("tap_method", "ocr"), obs)
                     rc, lit = decision.rc, decision.lit
                     _evlog(deps, f"verify: {decision.proof_kind.value} {decision.why}")
@@ -339,7 +360,9 @@ def run_once(deps: RunDeps) -> RunOutcome:
 
 
 def _verify_after_light(deps: RunDeps, notes: list, *, browsed: bool,
-                        verify_ladder: bool) -> tuple[VerifyObservation, ...]:
+                        verify_ladder: bool,
+                        pre_obs: tuple[VerifyObservation, ...] | None = None
+                        ) -> tuple[VerifyObservation, ...]:
     """点亮后的核实观察收集。
 
     - verify_ladder=False（47 案基线）：照旧单次 post_tap_observations；
@@ -353,7 +376,7 @@ def _verify_after_light(deps: RunDeps, notes: list, *, browsed: bool,
     观察交给 verify_light_decision 按旧阶梯判。
     """
     if not verify_ladder:
-        return deps.screen.post_tap_observations()
+        return pre_obs if pre_obs is not None else deps.screen.post_tap_observations()
 
     obs: list[VerifyObservation] = []
     if browsed:
@@ -367,7 +390,11 @@ def _verify_after_light(deps: RunDeps, notes: list, *, browsed: bool,
                 _tap_point(deps, bag_point, "BACK 落在频道页，点「抽福袋」胶囊回活动页", notes)
                 obs.extend(deps.screen.post_tap_observations(VerifyStage.AFTER_REENTER))
     else:
-        obs.extend(deps.screen.post_tap_observations())          # AFTER_DIRECT
+        # 已经为「是不是浏览任务页」读过一次 → 直接当 AFTER_DIRECT 用，省一次整页 OCR
+        if pre_obs is not None:
+            obs.extend(pre_obs)
+        else:
+            obs.extend(deps.screen.post_tap_observations())          # AFTER_DIRECT
 
     if _obs_count(obs) is None:
         # G5：进度行读不到，可能是浮层盖着——清浮层（认到关闭词才点）再读（旧 L1353-1358）
@@ -435,6 +462,15 @@ def _tap_point(deps: RunDeps, point: tuple[int, int], reason: str, notes: list) 
 def _take_prize(deps: RunDeps, point: tuple[int, int], notes: list) -> None:
     """G3：奖励浮层在场 + 判定核给了 take 点 → 点「开心收下」收奖（旧 take_prize_overlay）。"""
     _tap_point(deps, point, "奖励浮层在场，点「开心收下」收下", notes)
+
+
+def _browse_present(raw: str) -> bool:
+    """这一帧是不是「浏览任务页」（旧脚本 text_present browse）。
+
+    旧口径只看这一页有没有「浏览当前页面 / 即可点亮 / 滑动浏览」之一；
+    没有就不滑——亮了但没跳到浏览任务页时，滑 15s 纯属白烧，还会把页面滚走。
+    """
+    return any(k in raw for k in ("浏览当前页面", "即可点亮", "滑动浏览"))
 
 
 def _browse_after_light(deps: "RunDeps", notes: list) -> bool:

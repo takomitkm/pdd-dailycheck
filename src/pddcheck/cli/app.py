@@ -161,6 +161,9 @@ def _cmd_run(args) -> CliResult:
     # 证据落盘（T63，旧 EVIDENCE_DIR/<date>/<HHMMSS>/ 口径）：每帧截图 + run.log。
     # dry-run 也落（截图是只读的）；写失败只进 stats，绝不挡业务（I11）。
     evidence = EvidenceWriter(ev, date) if not getattr(args, "dry_run", False) else None
+    # manifest 先落（replay 的入口；早退/跳过的运行也要有一份，否则 load_run 判缺料）
+    if evidence is not None:
+        evidence.manifest({"date": date, "profile_id": "pdd-v1", "mode": "run"})
     lease = None
     try:
         lease = acquire_run_lease(state / "run.lock", args.device)
@@ -172,6 +175,11 @@ def _cmd_run(args) -> CliResult:
             notifier=NotificationSender(), journal=Journal(state / "journal" / "actions.jsonl"),
             cfg=cfg, now_ns=lambda: __import__("time").monotonic_ns(),
             lease_factory=None, evidence=evidence)
+        if evidence is not None:
+            evidence.event("commit", "outcome", lit=outcome.lit, rc=outcome.rc,
+                           exit=int(outcome.exit_code),
+                           marker=outcome.marker_written,
+                           delivered=outcome.delivered)
         # summary.txt（旧 pdd.sh L1638-1641 同款）：查因先看这一份，再进 run.log。
         if evidence is not None:
             evidence.summary({

@@ -52,6 +52,10 @@ class PipelineConfig:
     launch_activity: str = "com.xunmeng.pinduoduo.ui.activity.MainFrameActivity"
     entry_retry: int = 2
     prove_max: int = 3
+    # 轮播位寻找预算（旧 FIND_RETRY_bag=12 × FIND_INTERVAL_bag=3；profile
+    # targets.bag.find_retry/find_interval 同值）
+    bag_find_retry: int = 12
+    bag_find_interval_s: float = 3.0
     step_wait_s: float = 4.0
     # 频道页「抽福袋」的裁片标定（ADR-003 候选值，真机实测 (435,524)）：
     # (box, mode)；None=不启用（open_bag 就只用整页 OCR，频道页会 rc5）
@@ -139,6 +143,15 @@ class _ScreenFromPipeline:
         done_cand = results.get("done")
         if facts.done_text is None and done_cand is not None and done_cand.winning is not None:
             facts = facts_from_text(text + " 今日已点亮")
+        # 结构化证据（replay 输入）：manifest 一次 + 每通道 tsv（2026-11-19）
+        if self._evidence is not None:
+            try:
+                self._evidence.manifest({"date": self._cfg.business_date,
+                                         "profile_id": "pdd-v1"})
+                for src, txt in obs.ocr_texts.items():
+                    self._evidence.tsv(f"obs-{self.observe_calls:02d}-{src.value}", txt)
+            except Exception as exc:              # noqa: BLE001 — 证据不挡流程
+                self._evidence.errors.append(str(exc))
         return facts, results
 
     def light_facts(self) -> dict:
@@ -153,6 +166,13 @@ class _ScreenFromPipeline:
                              (facts.done_text, facts.exchange_text, facts.pend_text)) or ""
         all_text = getattr(self, "_last_raw_text", "")
         browse_page = ("滑动浏览" in all_text and "即可点亮" in all_text)
+        if self._evidence is not None:
+            self._evidence.event("step", "check_before",
+                                 before_count=facts.progress_count,
+                                 tap_point=list(tap_point) if tap_point else None,
+                                 done=facts.done_text is not None,
+                                 exchange=facts.exchange_text is not None,
+                                 pend=facts.pend_text is not None)
         return {"done_text": facts.done_text, "exchange_text": facts.exchange_text,
                 "pend_text": facts.pend_text, "pend_days": facts.pend_days,
                 "before_count": facts.progress_count, "tap_point": tap_point,
@@ -168,6 +188,13 @@ class _ScreenFromPipeline:
         take_point = None
         if facts_after.prize_text is not None:
             take_point = self._take_point(results)
+        if self._evidence is not None:
+            self._evidence.event("verify", "verify_observation",
+                                 stage=getattr(stage, "value", str(stage)),
+                                 after_count=after,
+                                 done_text=facts_after.done_text is not None,
+                                 prize_text=facts_after.prize_text is not None,
+                                 pend_text=facts_after.pend_text is not None)
         return (VerifyObservation(stage,
                                   after_count=after,
                                   done_text=facts_after.done_text is not None,
@@ -238,6 +265,8 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
         )
         policy = StagePolicy(pkg="com.xunmeng.pinduoduo", home_activity=cfg.home_activity,
                              entry_retry=cfg.entry_retry, prove_max=cfg.prove_max,
+                             seek_retry=cfg.bag_find_retry,
+                             seek_interval_s=cfg.bag_find_interval_s,
                              step_wait_s=cfg.step_wait_s)
 
         def act(kind, point):
