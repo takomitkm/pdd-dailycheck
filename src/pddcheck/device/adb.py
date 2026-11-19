@@ -59,7 +59,14 @@ class Completed:
 
 
 def _subprocess_runner(argv, timeout_s):
-    p = subprocess.run(argv, capture_output=True, timeout=timeout_s, check=False)
+    # adb 不在 PATH / 进程超时都收敛成 Completed，绝不让 FileNotFoundError
+    # 冒到上层（旧脚本在这里是 rc69「找不到 adb」；生产预检会先拦，单测关掉预检）
+    try:
+        p = subprocess.run(argv, capture_output=True, timeout=timeout_s, check=False)
+    except FileNotFoundError as exc:
+        return Completed(127, b"", str(exc).encode("utf-8", "replace"))
+    except subprocess.TimeoutExpired:
+        return Completed(124, b"", b"timeout")
     return Completed(p.returncode, p.stdout, p.stderr)
 
 
@@ -67,7 +74,9 @@ class AdbDevice:
     def __init__(self, serial: str, *, runner=None, timeout_s: float = 20.0,
                  pkg: str = "com.xunmeng.pinduoduo", now_ns=None,
                  home_activity: str | None = None,
-                 launch_activity: str | None = None) -> None:
+                 launch_activity: str | None = None,
+                 connect_retries: int = 1,
+                 connect_retry_wait_s: float = 2.0) -> None:
         if not serial:
             raise AdbError("serial_required", "必须显式指定设备 serial，禁止自动选第一台")
         self.serial = serial
@@ -82,6 +91,9 @@ class AdbDevice:
         self.launch_activity = launch_activity
         self._run = runner or _subprocess_runner
         self._timeout_s = timeout_s
+        # 重连预算（旧 ensure_device 4 轮；默认 1 = 既有调用方/单测行为不变）
+        self._connect_retries = connect_retries
+        self._connect_retry_wait_s = connect_retry_wait_s
         # 真实单调时钟（纳秒）；领域对象要求时间戳 >= 1
         self._now = now_ns or (lambda: time.monotonic_ns())
         self.state_epoch = 0
@@ -92,7 +104,34 @@ class AdbDevice:
     def _adb(self, *args: str) -> Completed:
         return self._run(["adb", "-s", self.serial, *args], self._timeout_s)
 
-    def connect(self) -> str:
+    def connect(self, *, retries: int | None = None,
+                retry_wait_s: float | None = None) -> str:
+        """探测连接；retries>1 时按旧 ensure_device 的口径重连（2026-11-19 迁移）。
+
+        旧脚本（L647-659）：`adb start-server` + 4× `timeout 15 adb connect` +
+        sleep 2，全失败才 rc2。这里同一语义：失败先补一次 `adb connect <serial>`
+        （只对 TCP serial 有意义），等 retry_wait_s 再 get-state。
+        默认 1 = 不重试（单测/既有调用方行为不变）；生产用 4。
+        """
+        last: AdbError | None = None
+        retries = self._connect_retries if retries is None else retries
+        retry_wait_s = self._connect_retry_wait_s if retry_wait_s is None else retry_wait_s
+        for attempt in range(max(1, retries)):
+            try:
+                return self._connect_once()
+            except AdbError as exc:
+                last = exc
+                if exc.code in ("unauthorized", "serial_required"):
+                    raise                       # 授权/没 serial：重试也没用
+                if attempt + 1 >= max(1, retries):
+                    break
+                if ":" in self.serial:
+                    self._adb("connect", self.serial)
+                time.sleep(retry_wait_s)
+        assert last is not None
+        raise last
+
+    def _connect_once(self) -> str:
         c = self._adb("get-state")
         state = c.out.decode("utf-8", "replace").strip()
         if c.rc != 0:

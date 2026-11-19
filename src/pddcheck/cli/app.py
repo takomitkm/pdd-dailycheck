@@ -151,12 +151,23 @@ def _cmd_run(args) -> CliResult:
     # home_activity=「已在首页」匹配口径（HomeActivity）；launch_activity=冷启动入口
     # （MainFrameActivity，`am start -n 包名/Activity`——11-10 rc7 根因修复）
     dev = AdbDevice(serial, home_activity=cfg.home_activity,
-                    launch_activity=cfg.launch_activity)
+                    launch_activity=cfg.launch_activity,
+                    connect_retries=4, connect_retry_wait_s=2.0)
     try:
+        # 旧 ensure_device 同款：4 轮重连（无线 adb 先 connect 再 get-state）
         dev.connect()
     except AdbError as exc:
-        return CliResult(ExitCode.NO_ADB if exc.code in ("adb_failed", "serial_required") else
-                         ExitCode.DEVICE_GONE, stderr=f"连接失败：{exc}\n")
+        if exc.code == "serial_required":
+            return CliResult(ExitCode.NO_ADB, stderr=f"连接失败：{exc}\n")
+        # 旧 L1546：设备掉线**先推一条**「PDD ❌ 设备掉线」再退 2
+        endpoint = (None if os.environ.get("PDDCHECK_NO_PUSH") == "1"
+                    else read_endpoint_file(home / "Desktop" / "pdd-push.url"))
+        try:
+            NotificationSender().send(endpoint, "PDD ❌ 设备掉线",
+                                      f"连接失败：{exc}")
+        except Exception:                       # noqa: BLE001 — 推送失败不改退出码
+            pass
+        return CliResult(ExitCode.DEVICE_GONE, stderr=f"连接失败：{exc}\n")
     store = DailyStore(ev, home / "Desktop" / "pdd-pause")
     # 证据落盘（T63，旧 EVIDENCE_DIR/<date>/<HHMMSS>/ 口径）：每帧截图 + run.log。
     # dry-run 也落（截图是只读的）；写失败只进 stats，绝不挡业务（I11）。

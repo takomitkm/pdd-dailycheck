@@ -725,3 +725,23 @@
   `run` 仍不读 `profile.toml`（靠 specs/profile 一致性测试挡漂移）；`AFTER_REENTER_BAG`
   救场路未接线。
 
+### 59. 2026-11-20 — 锁屏 rc3 + 掉线重连 rc2 + 缺 adb 不崩栈（0.1.58）
+
+- **锁屏 rc3（旧 ABORT_IF_LOCKED，L705-714/L1549）**：`StageRunner` 新增可选
+  `focus_kind` 供给器（只读 `dumpsys window` 的窗口类，不打 OCR）；`ensure_ready`
+  在 wake + dismiss-keyguard 之后读一次焦点，仍是 `keyguard` → `StageFailure(3)`
+  收手，**一个业务动作都不放**。生产由 bootstrap 传
+  `lambda: getattr(device.focus(), "window_kind", None)`；读不到/异常不拦（不改变 rc7 路径）。
+- **掉线重连 rc2（旧 ensure_device，L647-659/L1546）**：`AdbDevice` 加
+  `connect_retries` / `connect_retry_wait_s`（默认 1/2.0，单测行为不变）；生产 4 轮。
+  `connect()` 失败时若是 TCP serial 先补 `adb connect <serial>` 再 get-state；
+  `unauthorized` / `serial_required` 不重试（重试无意义）。全失败 → rc2 **先推一条**
+  「PDD ❌ 设备掉线」再退出（B02 同款通知差异）。
+- **缺 adb 不崩栈（审计 #6）**：`_subprocess_runner` 把 `FileNotFoundError` /
+  `TimeoutExpired` 收敛成 `Completed(127/124)` → `AdbError("adb_failed")`，
+  不再把异常炸到 CLI；生产预检的 rc69 仍在派发前先拦。
+- 测试：`tests/workflow/test_lock_and_reconnect.py` 4 条（重连成功 / 重试用尽 / 锁屏 rc3 /
+  缺 adb 变 AdbError）；`test_run_wiring` 的 FakeAdb 改成 `**kw`（跟随构造签名）。
+- **仍未迁**：`PILL_SCALES` ×1 档（几何分通道，要在 `vision/source.py` 登记第二个
+  PILL_LIGHT 几何）、`AFTER_REENTER_BAG` 救场路、`run` 真接线 `profile.toml`。
+

@@ -78,10 +78,13 @@ class StagePolicy:
 
 
 class StageRunner:
-    def __init__(self, read_page, act, policy: StagePolicy) -> None:
+    def __init__(self, read_page, act, policy: StagePolicy, focus_kind=None) -> None:
         self._read = read_page
         self._act = act
         self.policy = policy
+        # focus_kind：可选供给器 ()->WindowKind|str，只读焦点窗口类（不打 OCR）。
+        # 用来实现旧脚本 rc3「手机锁屏就别瞎点」（2026-11-19 迁移补齐）。
+        self._focus_kind = focus_kind
 
     # ---- 弹窗：清掉挡页面的推广弹窗（用户 11-08 现场指引） ---------------
     def dismiss_popup(self, popup_spec: TargetLocateSpec | None = None,
@@ -159,6 +162,15 @@ class StageRunner:
         self.policy._sleep(1.0)
         self._act("dismiss_keyguard", None)
         self.policy._sleep(1.0)
+        # rc3（旧脚本 ABORT_IF_LOCKED，L705-714/L1549）：wake+dismiss 之后仍是
+        # keyguard → 有密码锁着，再点也点不进去，直接报 3 收手（不虚放任何业务动作）。
+        if self._focus_kind is not None:
+            try:
+                kind = self._focus_kind()
+            except Exception:                     # noqa: BLE001 — 读不到就不拦
+                kind = None
+            if str(getattr(kind, "value", kind)) == "keyguard":
+                raise StageFailure(3, "手机锁屏（keyguard 未解除）")
         self._act("start", None)
         deadline = time.monotonic() + launch_wait_s
         launched = False

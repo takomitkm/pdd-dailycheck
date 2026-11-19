@@ -337,7 +337,8 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
             # 词框中心没有意义（2026-11-17 入口假命中 (200,20) 教训）。
             return PageView(fs.focused_package, fs.focused_activity, text, frame=obs)
 
-        runner = StageRunner(read_page, act, policy)
+        runner = StageRunner(read_page, act, policy,
+                             focus_kind=lambda: getattr(device.focus(), "window_kind", None))
 
         def entry_anchor_candidates():
             """首页「百亿补贴」入口的**锚点推算**候选点（11-13 加固）。
