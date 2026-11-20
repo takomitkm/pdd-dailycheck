@@ -768,3 +768,25 @@
 - 教训：**「关掉」是带观察期的断言，不是一次 `am force-stop` 的返回值**；
   凡是依赖「某进程不在」的判定，都要写明观察窗长度和取样次数。
 
+### 61. 2026-11-21 — 三项「暂不迁」的判据（不是漏做）
+
+迁移的准入条件一直是两条：**有真实帧/真实失败证明这一项确实缺**，且**能在真机或
+离线帧上验收**。三项各自卡在不同的一条上：
+
+- **`PILL_SCALES` ×1 档**：现通道模型是「一个 `CoordinateSource` = 一份 TSV + 一份几何」，
+  `FrameObservation.ocr_texts` / `geometries` 都按 source 做键；同一 source 两档比例
+  要么改契约层（键里带 scale），要么新增 `PILL_LIGHT_X1` 这类 source。**收益没有证据**：
+  11-19 的 obs-04/05/06 用整页 psm6 已经读到「已点亮」，×1 档在当前版式上不多给任何命中。
+  准入：出现「整页 + ×2 都读不出 done/light」的真帧，再按那帧量 ×1。
+- **`AFTER_REENTER_BAG`**：它是 verify 阶梯里的**救场路**（进度读不到 + 落回频道页时
+  点「抽福袋」胶囊回活动页，旧 L1322-1327）。它是跨层的：verify 在 `flow`，点福袋在
+  `StageRunner`（`stages`），要接线得把 `open_bag` 抽成回调穿三层。**不接的失败形态是
+  rc6（不写标记、不误报成功）**，只是少一次救场。准入：真机出现「卡频道页 → rc6」的形状。
+- **`run` 真接线 `profile.toml`**：Profile 有 11 个 target（含 dialog/prize/pend/browse），
+  当前编排只消费 5 个；一次性接线等于把 flow/ocr 几十个默认值一起切（light overlap、
+  各 region、band/pill 参数），验收需要「历史帧基线回放逐帧不回退」。**已做的替身**是
+  `tests/cli/test_specs_match_profile.py`：钉住 specs 的 alias/overlap/region 与 profile 同值
+  （坐标允许生产覆盖），把 11-18 那类漂移挡在提交前。也就是说「值」已对齐，「通路」未换。
+
+一句话：**没有证据就改点击面，风险大于收益**；这三项等对应的真帧/失败样本出现再动。
+
