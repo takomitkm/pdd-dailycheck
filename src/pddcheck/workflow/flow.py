@@ -92,6 +92,10 @@ class RunDeps:
     # 默认 False：47 案行为基线不包含浏览段；CLI 真机路径显式开启。
     browse_after_light: bool = False
     browse_sleep: object | None = None   # 注入 sleep（测试用）；默认 time.sleep
+    # 关闭核验的观察窗（11-20 复盘）：force-stop 后不能只看 3s——`:titan` 的 wakeup
+    # alarm 可能等到 ~7s 才把主进程拉活（11-20 00:11:16 实证）。默认空 = 只验一次
+    # （47 案基线/单测零等待）；生产由 PipelineConfig.close_waits_s=(3,6) 灌两段窗口。
+    close_waits_s: tuple[float, ...] = ()
     # 终态效果执行（G4/G8 迁移审计补上）：final_scroll（I06 最终 20 次下滑）、
     # close_policy 下发（rc0 force-stop+HOME / rc≠0 HOME / lit2/4 不动）、
     # last_activity 采集。默认 False 保持 47 案基线；CLI 真机路径显式开启。
@@ -614,45 +618,58 @@ def _force_close_quiet(deps: RunDeps, notes: list, *, why: str) -> None:
     if deps.dry_run or not getattr(deps, "execute_terminal_effects", False):
         return
     try:
-        closed = _force_close_verified(deps, notes, reason=f"早退兜底关 app（{why}）")
+        closed = ensure_app_closed(deps, notes)
         _evlog(deps, f"early_exit_close: {why} closed={closed}")
         notes.append(f"早退兜底：app {'已关闭' if closed else '关闭失败（进程仍在）'}")
     except Exception as exc:
         notes.append(f"早退兜底关 app 失败（忽略）：{exc}")
 
 
-def ensure_app_closed(deps: RunDeps, notes: list) -> bool:
+def ensure_app_closed(deps: RunDeps, notes: list, *, waits_s=None) -> bool:
     """关闭核验 + 兜底（收尾段之后的第二道闸）：pidof 还活着就再 stop 一轮。
 
     03:04 真机复盘（0.1.50）：force-stop 后 pidof 空、核验过，但 1~2s 后 PDD 的
     `:titan` 常驻子进程用排好的 wakeup alarm（ALARM_ACTION）把主进程**重新拉活**——
-    收尾关进程与 alarm 触发存在竞态。所以核验不能只验一次：**等 3s 再验一次**，
-    又活了就再杀一轮（最多 3 轮），仍活着才认输（推送喊话）。
+    收尾关进程与 alarm 触发存在竞态。
 
-    返回 True=当前确认已死（且 3s 复核仍死）；False=反复兜底后仍被拉活。
+    11-20 复盘（本函数原来只等 3s 再验一次，漏了）：`PDD 主进程 STIME=00:11:16`
+    在 close_verify=closed 之后仍活了 4 小时 → alarm 出手在 3s 窗口之外（≈+7s）。
+    现在按 `close_waits_s` 走**两段观察窗**（默认 +3s、再 +6s，共 ~9s）：
+    每段结束都验一次，活着就再杀一轮（`_force_close_verified`，内含 1.5s 重试）。
+    仍活着才认输（推送喊话，app_closed=False）。
+
+    返回 True=观察窗全过仍死；False=反复兜底后仍被拉活/读不到。
     """
     pid_of = getattr(deps.device, "pid_of", None)
     if pid_of is None:
         return True                               # 无验证原语：无可核验
-    for round_no in range(1, 4):
+    waits = waits_s if waits_s is not None else getattr(
+        deps, "close_waits_s", ())
+    for round_no, wait in enumerate(waits, 1):
         try:
             alive = pid_of()
-        except Exception as exc:
+        except Exception as exc:                  # noqa: BLE001 — 读失败=如实报没关成
             notes.append(f"关闭核验：pidof 读失败（{exc}）")
             return False
-        if alive is None:
-            if round_no == 1:
-                # 第一轮就死还不够（alarm 拉活竞态窗口 ~2s）：稳一稳再确认一次
-                time.sleep(3.0)
-                continue
-            return True
-        closed = _force_close_verified(deps, notes,
-                                       reason=f"关闭核验第 {round_no} 轮兜底再关", tries=2)
-        if not closed:
-            return False
-        time.sleep(3.0)                           # 给 titan alarm 一个出手的机会
-    # 三轮全走到这里 = 第三轮杀完+3s 复核仍死
-    return True
+        if alive is not None:
+            closed = _force_close_verified(
+                deps, notes, reason=f"关闭核验第 {round_no} 轮兜底再关", tries=2)
+            if not closed:
+                return False
+        time.sleep(max(0.0, float(wait)))         # 观察窗：给 titan alarm 出手机会
+    try:
+        alive = pid_of()
+    except Exception as exc:                      # noqa: BLE001
+        notes.append(f"关闭核验：pidof 读失败（{exc}）")
+        return False
+    if alive is None:
+        return True
+    # 观察窗全过又活了：最后一轮再杀一次，仍活就如实报 False（推送里会喊话）
+    _force_close_verified(deps, notes, reason="关闭核验最终兜底再关", tries=2)
+    try:
+        return pid_of() is None
+    except Exception:                             # noqa: BLE001
+        return False
 
 
 def _final_scroll(deps: RunDeps, notes: list) -> None:

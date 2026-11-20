@@ -12,7 +12,7 @@ import os
 from pddcheck.device import FakeDevice
 from pddcheck.notify import NotificationSender
 from pddcheck.storage import DailyStore, Journal
-from pddcheck.workflow.flow import RunDeps, run_once
+from pddcheck.workflow.flow import RunDeps, ensure_app_closed, run_once
 from pddcheck.workflow.verify import VerifyObservation, VerifyStage
 
 
@@ -71,6 +71,7 @@ def deps(tmp_path, *, facts=None, obs=(), effects=False, dry_run=False,
         business_date="2026-11-07", run_id="run-1", now_ns=lambda: 1000,
         lease_factory=None, force=False,
         dry_run=dry_run, browse_sleep=browse_sleep,
+        close_waits_s=(0.0, 0.0),
         execute_terminal_effects=effects, keep_days=keep_days)
     return d, rec, store
 
@@ -264,9 +265,28 @@ def deps_with_pid(tmp_path, pids, **kw):
     return d, dev, store
 
 
+def test_ensure_app_closed_kills_after_late_revival(tmp_path):
+    """11-20 复盘形状：第一段窗口是死，第二段窗口里被 titan alarm 拉活 → 必须再杀。
+
+    pids 队列：[None(第一段) → 4242(第二段发现复活) → None(再杀后) → None(最终)]
+    """
+    d, dev, _ = deps_with_pid(tmp_path, [None, 4242, None, None], effects=True)
+    notes: list = []
+    assert ensure_app_closed(d, notes) is True
+    assert [k for k, _ in dev._rec.actions] == ["stop"]
+
+
+def test_ensure_app_closed_reports_false_when_never_dies(tmp_path):
+    """反复杀仍活着 → 如实 False（推送正文会喊话，不写成已关闭）。"""
+    d, dev, _ = deps_with_pid(tmp_path, [4242], effects=True)
+    notes: list = []
+    assert ensure_app_closed(d, notes) is False
+    assert [k for k, _ in dev._rec.actions].count("stop") >= 2   # tries=2 的两次
+
+
 def test_skip_marker_path_still_closes_app(tmp_path):
     """11-18 铁律：标记已存在早退也要关 app（昨天 10:00 就是它把 PDD 留在前台的）。"""
-    d, dev, store = deps_with_pid(tmp_path, [None], effects=True)
+    d, dev, store = deps_with_pid(tmp_path, [4242, None], effects=True)
     store.write_marker("2026-11-07")          # 先写标记 → run_once 走早退
     out = run_once(d)
     assert out.skipped == "daily_marker"

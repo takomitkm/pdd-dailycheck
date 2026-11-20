@@ -66,6 +66,9 @@ class PipelineConfig:
     light_pill: tuple[tuple[float, float, float, float], str] | None = None
     # 点亮后浏览任务段（滑动 10s 才真点亮）；CLI 真机路径开、47 案基线关
     browse_after_light: bool = False
+    # 关闭核验观察窗（11-20 复盘：`:titan` 的 wakeup alarm 可能晚到 ~7s 才拉活主进程）。
+    # 每段窗口结束都验一次 pidof，活着就再杀；空 = 只验一次（基线/单测零等待）。
+    close_waits_s: tuple[float, ...] = (3.0, 6.0)
     # 终态效果执行（迁移审计 G4/G8）：final_scroll（I06）+ close_policy 下发 +
     # last_activity 采集；CLI 真机路径开、47 案基线关
     execute_terminal_effects: bool = False
@@ -483,6 +486,7 @@ def build_and_run(*, device, engine: OcrEngine, store: DailyStore,
                    browse_after_light=cfg.browse_after_light,
                    execute_terminal_effects=cfg.execute_terminal_effects,
                    verify_ladder=cfg.verify_ladder,
+                   close_waits_s=cfg.close_waits_s,
                    evidence_log=(evidence.log if evidence is not None else None))
     outcome = run_once(deps)
     _ev_log(evidence, f"run done: exit={int(outcome.exit_code)} lit={outcome.lit} "

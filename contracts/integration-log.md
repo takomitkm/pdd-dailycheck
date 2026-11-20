@@ -745,3 +745,26 @@
 - **仍未迁**：`PILL_SCALES` ×1 档（几何分通道，要在 `vision/source.py` 登记第二个
   PILL_LIGHT 几何）、`AFTER_REENTER_BAG` 救场路、`run` 真接线 `profile.toml`。
 
+### 60. 2026-11-21 — 关闭核验假阳性（`closed=True` 但进程活了 4h）→ 两段观察窗（0.1.59）
+
+- **11-20 实证**：00:08 那轮真签（`exit=0 lit=3 marker=True delivered=sent`，`PDD ✅`）；
+  00:11 收尾打 `close_verify: closed=True`。但同一份证据里，手机侧
+  `com.xunmeng.pinduoduo` 主进程 **PID 5326 STIME=00:11:16**，一直活到 11-21 04:27（4 小时+）。
+  → 「跑完必须关掉」的铁律在**成功路径**上不成立；`closed=True` 是竞态假阳性。
+- **机理**：`ensure_app_closed` 原来只做「死 → 等 3s → 再验一次」。`:titan` 的 wakeup
+  alarm（ALARM_ACTION）这次出手在 ~+7s，正好落在观察窗外；之后流程照常
+  notify/退出，进程就留着了。11-19 那轮没暴露是运气（alarm 未到期）。
+- **真机复测（11-21 04:37）**：`am force-stop` 后 +3/+6/+9/+15s 四次抽样，pidof 与
+  ps 全空、未复活——说明 plain force-stop 本身可靠，**复活是 alarm 到期才发生的
+  时变量**，不能靠固定 3s 赌它。
+- **修复（0.1.59）**：`ensure_app_closed` 改为两段观察窗（`close_waits_s=(3,6)`，
+  共 ~9s，覆盖到 +9s）：每段结束都验，活着就 `_force_close_verified` 再杀一轮；
+  最后再验一次，仍活 → 最终兜底再杀并**如实返回 False**（推送正文会喊话）。
+  早退路径 `_force_close_quiet` 也改走同一个 `ensure_app_closed`（原来它只做单次
+  `_force_close_verified`，同样漏掉复活窗）。单测注入 `close_waits_s=(0,0)` 零等待。
+- 测试：`test_ensure_app_closed_kills_after_late_revival`（第一段死、第二段被拉活 →
+  必须再杀一轮）、`test_ensure_app_closed_reports_false_when_never_dies`（杀不动 → False）；
+  早退用例改用「进程活着」的 pid 序列，确认真会 stop。全量 passed。
+- 教训：**「关掉」是带观察期的断言，不是一次 `am force-stop` 的返回值**；
+  凡是依赖「某进程不在」的判定，都要写明观察窗长度和取样次数。
+
